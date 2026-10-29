@@ -449,6 +449,12 @@ pub fn state(o: &ServeOpts) -> Result<AppState> {
     eprintln!("{} messages wait for an editor's review; {} are restricted to researchers", restricted.pending.len(), restricted.sensitive.len());
     let base_url = o.base_url.clone().map(|b| b.trim_end_matches('/').to_string()).filter(|b| !b.is_empty());
     let base_host = base_url.as_ref().map(|b| b.trim_start_matches("https://").trim_start_matches("http://").split('/').next().unwrap_or("").to_string());
+    if o.trust_proxy {
+        // the load balancer's address, to read the client's address behind it
+        if let Some(h) = &base_host {
+            security::watch_front_door(h);
+        }
+    }
     if let Some(email) = o.admin_reset.as_deref().map(|e| e.trim().to_lowercase()).filter(|e| !e.is_empty()) {
         let mut sc = site_db.get()?;
         match sc.account_by_email(&email)? {

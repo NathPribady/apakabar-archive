@@ -20,7 +20,7 @@ use axum_extra::extract::cookie::CookieJar;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 pub const CSRF_COOKIE: &str = "ak_csrf";
@@ -70,14 +70,38 @@ fn infrastructure(ip: &IpAddr) -> bool {
     }
 }
 
+/// The public addresses of the site's own front door: the load balancer its domain points at.
+/// Google's load balancer (in front of a published Replit app) writes the client's address and
+/// then its own into X-Forwarded-For, so this one is passed over like the host's private ones.
+/// Found by looking the domain up, at start and then every half hour (see `watch_front_door`).
+static FRONT_DOOR: once_cell::sync::Lazy<RwLock<Vec<IpAddr>>> = once_cell::sync::Lazy::new(|| RwLock::new(Vec::new()));
+
+/// Look up the site's domain (from --base-url) in the background, now and every half hour.
+pub fn watch_front_door(host: &str) {
+    let host = host.split(':').next().unwrap_or("").trim().to_string();
+    if host.is_empty() || host.parse::<IpAddr>().is_ok() || host == "localhost" {
+        return;
+    }
+    std::thread::spawn(move || loop {
+        use std::net::ToSocketAddrs;
+        let found: Vec<IpAddr> = (host.as_str(), 443).to_socket_addrs().map(|it| it.map(|a| a.ip()).collect()).unwrap_or_default();
+        if !found.is_empty() {
+            *FRONT_DOOR.write().unwrap_or_else(|e| e.into_inner()) = found;
+        }
+        std::thread::sleep(Duration::from_secs(1800));
+    });
+}
+
 /// The client's address. Behind a proxy (`--trust-proxy`), X-Forwarded-For lists the addresses
-/// the request came through, and each proxy adds the one it saw at the end. A client can write
-/// anything at the start, so the list is read from the end: the first address that is not the
-/// host's own network is the client. Without a proxy, the socket's peer.
+/// the request came through, each proxy adding the one it saw at the end. A client can write
+/// anything at the start, so the list is read from the end: past the host's own proxies
+/// (private addresses), past the load balancer's own address when the request came through
+/// Google's load balancer (it says so in `Via: 1.1 google`) or that address is the domain's,
+/// and the next address is the client. Without a proxy, the socket's peer.
 fn client_ip(req: &Request, trust_proxy: bool) -> String {
     if trust_proxy {
         if let Some(f) = req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(ip) = forwarded_client(f) {
+            if let Some(ip) = forwarded_client(f, via_google(req)) {
                 return limit_key(ip);
             }
         }
@@ -85,25 +109,50 @@ fn client_ip(req: &Request, trust_proxy: bool) -> String {
     req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| limit_key(c.0.ip())).unwrap_or_else(|| "unknown".into())
 }
 
-fn forwarded_client(header: &str) -> Option<IpAddr> {
+fn via_google(req: &Request) -> bool {
+    req.headers().get_all(header::VIA).iter().filter_map(|v| v.to_str().ok()).any(|v| v.split(',').any(|hop| hop.trim().eq_ignore_ascii_case("1.1 google")))
+}
+
+fn forwarded_client(header: &str, via_google: bool) -> Option<IpAddr> {
+    forwarded_client_with(header, via_google, &FRONT_DOOR.read().unwrap_or_else(|e| e.into_inner()))
+}
+
+fn forwarded_client_with(header: &str, via_google: bool, front: &[IpAddr]) -> Option<IpAddr> {
     let addrs: Vec<IpAddr> = header.split(',').filter_map(|p| p.trim().parse::<IpAddr>().ok()).collect();
-    addrs.iter().rev().find(|ip| !infrastructure(ip)).or(addrs.first()).copied()
+    let mut i = addrs.len();
+    while i > 0 && infrastructure(&addrs[i - 1]) {
+        i -= 1;
+    }
+    // the load balancer's own address, when there is a client's before it
+    if i > 0 && (front.contains(&addrs[i - 1]) || (via_google && i > 1)) {
+        i -= 1;
+    }
+    while i > 0 && infrastructure(&addrs[i - 1]) {
+        i -= 1;
+    }
+    if i > 0 { Some(addrs[i - 1]) } else { addrs.first().copied() }
 }
 
 /// For the first few requests after a start, what the proxy's X-Forwarded-For looks like
 /// (kinds of address only, never the addresses), so the reading above can be checked.
-fn log_forwarding(header: &str) {
+fn log_forwarding(header: &str, via_google: bool) {
     static SEEN: AtomicUsize = AtomicUsize::new(0);
-    if SEEN.fetch_add(1, Ordering::Relaxed) >= 3 {
+    if SEEN.fetch_add(1, Ordering::Relaxed) >= 5 {
         return;
     }
+    let front = FRONT_DOOR.read().unwrap_or_else(|e| e.into_inner()).clone();
     let kinds: Vec<&str> = header.split(',').map(|p| match p.trim().parse::<IpAddr>() {
         Ok(ip) if infrastructure(&ip) => "proxy/private",
+        Ok(ip) if front.contains(&ip) => "the domain's load balancer",
         Ok(_) => "public",
         Err(_) => "unreadable",
     }).collect();
-    let pos = forwarded_client(header).and_then(|c| header.split(',').position(|p| p.trim().parse::<IpAddr>().ok() == Some(c))).map(|p| p + 1).unwrap_or(0);
-    eprintln!("proxy check: X-Forwarded-For lists [{}]; the client is read from entry {pos}", kinds.join(", "));
+    let pos = forwarded_client_with(header, via_google, &front).and_then(|c| header.split(',').position(|p| p.trim().parse::<IpAddr>().ok() == Some(c))).map(|p| p + 1).unwrap_or(0);
+    eprintln!(
+        "proxy check: X-Forwarded-For lists [{}]{}; the client is read from entry {pos}",
+        kinds.join(", "),
+        if via_google { ", through Google's load balancer" } else { "" }
+    );
 }
 
 fn loopback_peer(req: &Request) -> bool {
@@ -265,7 +314,7 @@ pub async fn context(State(st): State<AppState>, req: Request, next: Next) -> Re
     let forwarded = req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
     if let Some(f) = &forwarded {
         if st.trust_proxy {
-            log_forwarding(f);
+            log_forwarding(f, via_google(&req));
         }
     }
     let internal = forwarded.is_none() && loopback_peer(&req);
@@ -498,9 +547,21 @@ mod tests {
 
     #[test]
     fn addresses() {
+        let read = |h: &str, via: bool, front: &[&str]| {
+            let f: Vec<IpAddr> = front.iter().map(|x| x.parse().unwrap()).collect();
+            forwarded_client_with(h, via, &f).map(|i| i.to_string()).unwrap_or_default()
+        };
         // read from the right, past the host's own proxies
-        assert_eq!(forwarded_client("1.2.3.4, 203.0.113.9, 35.191.2.3").map(|i| i.to_string()).as_deref(), Some("203.0.113.9"));
-        assert_eq!(forwarded_client("10.0.0.1").map(|i| i.to_string()).as_deref(), Some("10.0.0.1"));
+        assert_eq!(read("1.2.3.4, 203.0.113.9, 35.191.2.3", false, &[]), "203.0.113.9");
+        assert_eq!(read("10.0.0.1", false, &[]), "10.0.0.1");
+        // a published app: client, Google's load balancer (the domain's address), Replit's proxy
+        assert_eq!(read("198.51.100.7, 34.111.1.2, 10.1.2.3", false, &["34.111.1.2"]), "198.51.100.7");
+        assert_eq!(read("198.51.100.7, 34.111.1.2, 10.1.2.3", true, &[]), "198.51.100.7");
+        // a client that writes its own entry first gains nothing
+        assert_eq!(read("6.6.6.6, 198.51.100.7, 34.111.1.2, 10.1.2.3", true, &[]), "198.51.100.7");
+        // the workspace's proxy: client, then private addresses only
+        assert_eq!(read("198.51.100.7, 10.1.2.3, 10.4.5.6", false, &[]), "198.51.100.7");
+        assert_eq!(read("198.51.100.7, 10.1.2.3", true, &[]), "198.51.100.7");
         assert_eq!(limit_key("2001:db8:aa:bb:1:2:3:4".parse().unwrap()), "2001:db8:aa:bb::/64");
         assert_eq!(limit_key("::ffff:198.51.100.7".parse().unwrap()), "198.51.100.7");
     }
