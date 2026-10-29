@@ -1,0 +1,16 @@
+# Replit settings for the Apakabar Archive. The steps are in DEPLOY-REPLIT.md.
+#
+# The Run button and the published app both start the site with replit-start.sh. Before the
+# first Run, build everything once in the Shell with:  sh replit-build.sh
+run = ["sh", "replit-start.sh"]
+
+[[ports]]
+localPort = 8080
+externalPort = 80
+
+[deployment]
+# Reserved VM: one always-on machine (choose 0.5 vCPU / 2 GB in the Publish dialog)
+deploymentTarget = "gce"
+build = ["sh", "replit-build.sh"]
+run = ["sh", "replit-start.sh"]
+ignorePorts = false

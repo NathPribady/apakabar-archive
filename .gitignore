@@ -1,0 +1,30 @@
+# Build output, and the Rust toolchain and system libraries that replit-build.sh puts beside it
+/target/
+/.toolchain/
+/runtime/
+
+# The archive stays out of the repository: the texts (data/) and the databases built from them
+# hold copyrighted articles and the names of private people, and site.db holds accounts.
+/data/
+/apakabar.db
+/apakabar.db-*
+/apakabar.db.building*
+/.schema
+/site.db
+/site.db-*
+*.db
+*.db-shm
+*.db-wal
+
+# Editors working notes on single messages, among them the May 1998 messages that identify survivors
+/tools/first_pass_review.json
+/tools/first_pass_checks.json
+
+# Logs, bundles and local state
+*.log
+*.tar.gz
+/.cache/
+/.local/
+/.config/
+/.upm/
+/.agents/

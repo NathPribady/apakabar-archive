@@ -1,0 +1,52 @@
+[package]
+name = "apakabar"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Apakabar Archive: ingest, analysis and web server for John MacDougall's apakabar lists (1990-2002)"
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
+rayon = "1.10"
+regex = "1.10"
+once_cell = "1.19"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+axum = { version = "0.7", features = ["form", "query"] }
+axum-extra = { version = "0.9", features = ["cookie"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tower-http = { version = "0.5", features = ["compression-gzip", "compression-br"] }
+maud = { version = "0.26", features = ["axum"] }
+argon2 = "0.5"
+rand = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+whatlang = "0.16"
+ahash = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+urlencoding = "2"
+aho-corasick = "1"
+zstd = "0.13"
+time = "0.3"
+sastrawi-rs = "0.5.3"
+rust_xlsxwriter = { version = "0.96", features = ["constant_memory"] }
+flate2 = "1"
+# the site store on hosts without a lasting disk (Replit): PostgreSQL over TLS
+postgres = "0.19"
+r2d2_postgres = "0.18"
+tokio-postgres-rustls = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "0.26"
+sha2 = "0.10"
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+
+[dev-dependencies]
+tower = { version = "0.4", features = ["util"] }
+http-body-util = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
