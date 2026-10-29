@@ -134,6 +134,9 @@ pub fn weekdays() -> [&'static str; 7] {
 
 /// "1998-05-14" -> "14 May 1998" / "14 Mei 1998"; "1998-05" -> "May 1998".
 pub fn nice_date(d: &str) -> String {
+    if !d.is_ascii() {
+        return d.to_string();
+    }
     if d.len() >= 10 {
         let m: usize = d[5..7].parse().unwrap_or(1);
         let day: u32 = d[8..10].parse().unwrap_or(1);
@@ -148,6 +151,9 @@ pub fn nice_date(d: &str) -> String {
 
 /// "1998-05" -> "May 1998" (short month).
 pub fn nice_ym(ym: &str) -> String {
+    if !ym.is_ascii() {
+        return ym.to_string();
+    }
     let m: usize = ym.get(5..7).and_then(|v| v.parse().ok()).unwrap_or(1);
     format!("{} {}", month_short(m), &ym[..4.min(ym.len())])
 }

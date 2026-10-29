@@ -120,6 +120,12 @@ pub fn open_rw(path: &Path) -> rusqlite::Result<Connection> {
     Ok(c)
 }
 
+/// The messages readers may not open, as a subquery the restricted-messages index answers
+/// alone. Lists and searches test `m.id NOT IN` this rather than reading `sensitive` from each
+/// row: the flag sits after the text, so reading it means reading every message whole (360 MB
+/// for a title search over "timor", against half a megabyte this way).
+pub const RESTRICTED_IDS: &str = "(SELECT id FROM messages WHERE sensitive = 1)";
+
 /// Add the start-up indexes to a database built before they existed. Returns true when it
 /// had to (that reads the table once).
 pub fn ensure_start_indexes(path: &Path) -> rusqlite::Result<bool> {

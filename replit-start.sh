@@ -5,7 +5,7 @@ if [ ! -x target/release/apakabar ] || [ ! -f apakabar.db ]; then
   echo "The program or the archive database is missing: run  sh replit-build.sh  in the Shell first."
   exit 1
 fi
-CONTACT="${APAKABAR_CONTACT:-nath@logosid.app}"
+CONTACT="${APAKABAR_CONTACT:-nath@logosid.app, np2903@tc.columbia.edu}"
 # Run through the bundled system libraries when this host lacks the standard program loader.
 APAKABAR=./target/release/apakabar
 if [ ! -e /lib64/ld-linux-x86-64.so.2 ] && [ -x runtime/ld-linux-x86-64.so.2 ]; then

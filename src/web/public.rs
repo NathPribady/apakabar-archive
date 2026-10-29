@@ -6,7 +6,7 @@
 use super::auth::{self, MaybeUser};
 use super::charts::{self, MonthBar, Series};
 use super::i18n::{self, dec, is_id, pct1, t, tf};
-use super::layout::{csrf_field, fmt_n, nice_date, page, pct};
+use super::layout::{self, csrf_field, fmt_n, nice_date, page, pct};
 use super::security::{self, ClientIp};
 use super::{blocking, site, AppError, AppState};
 use crate::{lexicon, sources};
@@ -341,7 +341,7 @@ pub async fn home(State(st): State<AppState>, MaybeUser(user): MaybeUser) -> Mar
     });
     b.insert("figure:monthly", html! {
         div.figure {
-            h4 { (t("Recovered messages per month, by language", "Pesan yang dipulihkan per bulan, menurut bahasa")) }
+            p.ft { (t("Recovered messages per month, by language", "Pesan yang dipulihkan per bulan, menurut bahasa")) }
             p.sub { (t("Numbered markers: 1 Santa Cruz massacre · 2 press bans · 3 attack on the PDI · 4 rupiah floated · 5 May 1998 · 6 East Timor referendum · 7 Megawati president.", "Penanda bernomor: 1 Pembantaian Santa Cruz · 2 pembredelan pers · 3 penyerbuan kantor PDI · 4 rupiah diambangkan · 5 Mei 1998 · 6 referendum Timor Timur · 7 Megawati menjadi presiden.")) (thin_note) }
             (monthly_chart(&st, true))
             div.src { (tf(|| format!("Source: Apakabar Archive, {} distinct messages.", fmt_n(canonical)), || format!("Sumber: Arsip Apakabar, {} pesan berbeda.", fmt_n(canonical)))) }
@@ -349,7 +349,7 @@ pub async fn home(State(st): State<AppState>, MaybeUser(user): MaybeUser) -> Mar
     });
     b.insert("figure:underground", html! {
         div.figure {
-            h4 { (t("Underground and banned-press share of reposted news", "Bagian media bawah tanah dan pers terlarang dalam berita yang dimuat ulang")) }
+            p.ft { (t("Underground and banned-press share of reposted news", "Bagian media bawah tanah dan pers terlarang dalam berita yang dimuat ulang")) }
             p.sub { (t("SiaR, Xpos, PIJAR, PRD and AJI bulletins, with Tempo Interaktif and D&R from the 1994 bans to 1998. Dashed: foreign press and wires. Share of news with a known outlet, by quarter (quarters under 30 messages left out).", "Buletin SiaR, Xpos, PIJAR, PRD dan AJI, serta Tempo Interaktif dan D&R sejak pembredelan 1994 sampai 1998. Garis putus-putus: pers asing dan kantor berita. Bagian dari berita yang media asalnya diketahui, per triwulan (triwulan dengan kurang dari 30 pesan tidak ditampilkan).")) }
             (charts::lines(&xl, &[
                 Series { name: t("Underground", "Bawah tanah").into(), color: "--accent", values: banned.clone(), dashed: false },
@@ -360,14 +360,14 @@ pub async fn home(State(st): State<AppState>, MaybeUser(user): MaybeUser) -> Mar
     });
     b.insert("figure:themes", html! {
         div.figure {
-            h4 { (t("Share of each year's messages about each theme", "Bagian pesan setiap tahun yang membahas setiap tema")) }
+            p.ft { (t("Share of each year's messages about each theme", "Bagian pesan setiap tahun yang membahas setiap tema")) }
             p.sub { (t("Shading is relative to each theme's peak year: read along a row, not between rows. Terms under ", "Gradasi warna relatif terhadap tahun puncak setiap tema: baca sepanjang baris, bukan antarbaris. Istilahnya di ")) a href="/analysis/themes" { (t("Themes", "Tema")) } "." }
             (charts::heat_table(&years.iter().map(|y| format!("'{}", &y[2..])).collect::<Vec<_>>(), &heat_rows, true, "--accent"))
         }
     });
     b.insert("figure:people", html! {
         div.figure.inline {
-            h4 { (t("People named in the most messages", "Tokoh yang disebut dalam paling banyak pesan")) }
+            p.ft { (t("People named in the most messages", "Tokoh yang disebut dalam paling banyak pesan")) }
             p.sub { (t("Messages naming each person, 1990–2002 (MacDougall himself left out).", "Jumlah pesan yang menyebut setiap tokoh, 1990–2002 (MacDougall sendiri tidak dihitung).")) }
             (charts::hbars(&people, "--accent2"))
         }
@@ -402,7 +402,7 @@ pub async fn themes(State(st): State<AppState>, MaybeUser(user): MaybeUser) -> M
                 div.card id=(slug) style="margin:16px 0" {
                     div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap" {
                         div style="max-width:560px" {
-                            h3 style="margin:0" { (i18n::theme_name(&slug, &s(&x["name"]))) }
+                            h2.h3 style="margin:0" { (i18n::theme_name(&slug, &s(&x["name"]))) }
                             p.small style="margin:4px 0" { (i18n::theme_desc(&slug, &s(&x["description"]))) ". "
                                 (tf(|| format!("{} messages about it, {} that mention it; busiest month {} ({}).", fmt_n(i(&x["total"])), fmt_n(i(&x["mentions"])), charts::nice_ym(&s(&x["peak"]["ym"])), i(&x["peak"]["n"])), || format!("{} pesan membahasnya, {} menyebutnya; bulan tersibuk {} ({}).", fmt_n(i(&x["total"])), fmt_n(i(&x["mentions"])), charts::nice_ym(&s(&x["peak"]["ym"])), i(&x["peak"]["n"]))))
                                 @if let Some((p, n, who)) = set_precision(&st, &format!("about:{slug}")) { " " (t("Precision", "Presisi")) " " b { (pct_p(p)) } " (" (n) " " (t("messages checked", "pesan diperiksa")) ", " (who_label(who)) ")." } }
@@ -427,12 +427,12 @@ pub async fn sources(State(st): State<AppState>, MaybeUser(user): MaybeUser) -> 
         ("id_daily", t("Indonesian dailies", "Harian Indonesia"), "--id"),
         ("id_magazine", t("Indonesian magazines", "Majalah Indonesia"), "--mixed"),
         ("id_online", t("Indonesian online", "Media daring Indonesia"), "--teal"),
-        ("id_wire", "Antara", "--ink3"),
+        ("id_wire", "Antara", "--grey"),
         ("alternative", t("Underground", "Bawah tanah"), "--ink"),
         ("wire", t("Wire services", "Kantor berita"), "--accent2"),
-        ("foreign", t("Foreign press", "Pers asing"), "--en"),
+        ("foreign", t("Foreign press", "Pers asing"), "--sky"),
         ("ngo", t("NGOs", "LSM"), "--plum"),
-        ("list_rubric", t("Apakabar rubrics", "Rubrik apakabar"), "--rule"),
+        ("list_rubric", t("Apakabar rubrics", "Rubrik apakabar"), "--other"),
         ("contributor", t("Contributors", "Kontributor"), "--ink2"),
     ];
     let years: Vec<(String, Vec<(String, i64)>)> = arr(&src["by_year_category"]).iter().map(|y| {
@@ -453,14 +453,14 @@ pub async fn sources(State(st): State<AppState>, MaybeUser(user): MaybeUser) -> 
             h1 { (t("Sources", "Sumber")) }
             p.lede style="max-width:720px" { (t("Where apakabar's texts came from. MacDougall marked most reposts with an outlet code (KMP for ", "Dari mana teks-teks apakabar berasal. MacDougall menandai sebagian besar kiriman ulang dengan kode media (KMP untuk ")) em { "Kompas" } (t(", JKTP for ", ", JKTP untuk ")) em { "The Jakarta Post" } (t("); where the code is missing, the archive link or the opening lines often name the outlet.", "); bila kodenya tidak ada, tautan arsip atau baris pembuka sering menyebut medianya.")) }
             div.figure.inline {
-                h4 { (t("Outlets by kind, share of identified messages per year", "Media menurut jenis, bagian dari pesan yang dikenali per tahun")) }
+                p.ft { (t("Outlets by kind, share of identified messages per year", "Media menurut jenis, bagian dari pesan yang dikenali per tahun")) }
                 p.sub { (t("Messages without an identifiable outlet are left out; before 1995 these are the majority (MacDougall's own summaries).", "Pesan yang media asalnya tak dapat dikenali tidak dihitung; sebelum 1995 pesan seperti ini mayoritas (ringkasan MacDougall sendiri).")) }
                 (charts::stacked100(&years, &cats))
             }
             div.grid2 {
-                div { h3 { (t("Most-cited outlets", "Media yang paling sering dikutip")) } (charts::hbars(&top, "--accent2")) }
+                div { h2.h3 { (t("Most-cited outlets", "Media yang paling sering dikutip")) } (charts::hbars(&top, "--accent2")) }
                 div {
-                    h3 { (t("Banned, successor and underground outlets by year", "Media yang dibredel, penerusnya dan media bawah tanah per tahun")) }
+                    h2.h3 { (t("Banned, successor and underground outlets by year", "Media yang dibredel, penerusnya dan media bawah tanah per tahun")) }
                     table.t {
                         thead { tr { th { (t("Code", "Kode")) } @for y in &yrs { th.n { "'" (&y[2..]) } } } }
                         tbody { @for c in &codes {
@@ -492,7 +492,7 @@ pub async fn events(State(st): State<AppState>, MaybeUser(user): MaybeUser) -> M
                     @let daily: Vec<(i64, i64)> = arr(&e["daily"]).iter().map(|d| (i(&d[0]), i(&d[1]))).collect();
                     div.ev id=(slug) {
                         div.d { (nice_date(&s(&e["date"]))) }
-                        h3 style="margin:2px 0 4px" { (i18n::event_name(&slug, &s(&e["name"]))) }
+                        h2.h3 style="margin:2px 0 4px" { (i18n::event_name(&slug, &s(&e["name"]))) }
                         p.small style="margin:0 0 6px" { (i18n::event_desc(&slug, &s(&e["description"]))) }
                         div style="max-width:420px" { (charts::event_bars(&daily, -30, 90)) }
                         p.small {
@@ -534,11 +534,11 @@ pub async fn people(State(st): State<AppState>, MaybeUser(user): MaybeUser) -> M
             div.kicker { (t("Analysis", "Analisis")) }
             h1 { (t("People, organisations and places", "Tokoh, organisasi dan tempat")) }
             p.lede style="max-width:720px" { (tf(|| format!("Counts of distinct messages naming each person, organisation or place, from a list of {n_names} names and spellings. Short names can catch namesakes; see each list of spellings in the reading room."), || format!("Jumlah pesan berbeda yang menyebut setiap tokoh, organisasi atau tempat, dari daftar {n_names} nama dan ejaannya. Nama pendek dapat menjaring orang lain yang bernama sama; lihat daftar ejaan masing-masing di ruang baca."))) }
-            div.figure.inline { h4 { (t("Messages naming each person, by year", "Pesan yang menyebut setiap tokoh, per tahun")) } p.sub { (t("Shading relative to each person's own busiest year; numbers are message counts.", "Gradasi warna relatif terhadap tahun tersibuk setiap tokoh; angkanya adalah jumlah pesan.")) } (charts::heat_table(&years.iter().map(|y| format!("'{}", &y[2..])).collect::<Vec<_>>(), &rows, true, "--accent2")) }
+            div.figure.inline { p.ft { (t("Messages naming each person, by year", "Pesan yang menyebut setiap tokoh, per tahun")) } p.sub { (t("Shading relative to each person's own busiest year; numbers are message counts.", "Gradasi warna relatif terhadap tahun tersibuk setiap tokoh; angkanya adalah jumlah pesan.")) } (charts::heat_table(&years.iter().map(|y| format!("'{}", &y[2..])).collect::<Vec<_>>(), &rows, true, "--accent2")) }
             div.grid3 {
-                div { h3 { (t("People", "Tokoh")) } (charts::hbars(&bars("person", 30), "--accent")) }
-                div { h3 { (t("Organisations", "Organisasi")) } (charts::hbars(&bars("org", 30), "--accent2")) }
-                div { h3 { (t("Places", "Tempat")) } (charts::hbars(&bars("place", 30), "--ink3")) }
+                div { h2.h3 { (t("People", "Tokoh")) } (charts::hbars(&bars("person", 30), "--accent")) }
+                div { h2.h3 { (t("Organisations", "Organisasi")) } (charts::hbars(&bars("org", 30), "--accent2")) }
+                div { h2.h3 { (t("Places", "Tempat")) } (charts::hbars(&bars("place", 30), "--grey")) }
             }
             h2 { (t("Named together", "Disebut bersama")) }
             p { (t("Pairs of the 24 most-named people and organisations that appear in the same message most often, in three periods.", "Pasangan dari 24 tokoh dan organisasi yang paling sering disebut, yang paling sering muncul dalam pesan yang sama, dalam tiga periode.")) }
@@ -606,15 +606,18 @@ pub async fn may1998(State(st): State<AppState>, MaybeUser(user): MaybeUser) -> 
                 (tf(|| format!("From May to October 1998, {} of the database's messages survive.", pct(q98)), || format!("Dari Mei sampai Oktober 1998, {} pesan basis data masih ada.", pct(q98)))) }
             @if !can { p.small { (t("Messages that may name survivors or private people are open only to approved researchers, and their titles are withheld below until an editor has reviewed them.", "Pesan yang mungkin menyebut nama penyintas atau orang biasa hanya terbuka bagi peneliti yang disetujui, dan judulnya di bawah ditahan sampai editor meninjaunya.")) } }
             div.figure {
-                h4 { (t("Messages per month: focused (dark red), same paragraph (blue), other mentions of sexual violence (grey)", "Pesan per bulan: terfokus (merah tua), paragraf yang sama (biru), sebutan lain tentang kekerasan seksual (abu-abu)")) }
+                p.ft { (t("Messages per month: focused (dark red), same paragraph (blue), other mentions of sexual violence (grey)", "Pesan per bulan: terfokus (merah tua), paragraf yang sama (biru), sebutan lain tentang kekerasan seksual (abu-abu)")) }
                 (charts::monthly_stacked(&months, &[("--accent", t("focused (tier 3)", "terfokus (tingkat 3)")), ("--accent2", t("same paragraph (tier 2)", "paragraf yang sama (tingkat 2)")), ("--other", t("mentions (tier 1)", "sebutan (tingkat 1)"))], &[], &[], None))
             }
             div.grid2 {
-                div { h3 { (t("Where the messages came from", "Dari mana pesan-pesan itu berasal")) } p.small { (t("Tiers 2 and 3.", "Tingkat 2 dan 3.")) } (charts::hbars(&srcs, "--accent2")) }
-                div { h3 { (t("Words used in them", "Kata-kata yang dipakai")) } p.small { (t("Messages of tiers 2 and 3 containing each word (substring match).", "Pesan tingkat 2 dan 3 yang memuat setiap kata (pencocokan sebagian kata).")) } (charts::hbars(&terms, "--accent")) }
+                div { h2.h3 { (t("Where the messages came from", "Dari mana pesan-pesan itu berasal")) } p.small { (t("Tiers 2 and 3.", "Tingkat 2 dan 3.")) } (charts::hbars(&srcs, "--accent2")) }
+                div { h2.h3 { (t("Words used in them", "Kata-kata yang dipakai")) } p.small { (t("Messages of tiers 2 and 3 containing each word (substring match).", "Pesan tingkat 2 dan 3 yang memuat setiap kata (pencocokan sebagian kata).")) } (charts::hbars(&terms, "--accent")) }
             }
             h2 { (t("The first messages", "Pesan-pesan pertama")) }
-            table.t { tbody { @for x in arr(&m["first"]) { tr { td style="white-space:nowrap" { (s(&x["date"])) } td { (link_msg(&st, &user, &s(&x["ak_id"]), &s(&x["title"]))) } td { (s(&x["source"])) } td.small { (t("tier", "tingkat")) " " (i(&x["tier"])) } } } } }
+            table.t {
+                thead { tr { th scope="col" { (t("Date", "Tanggal")) } th scope="col" { (t("Message", "Pesan")) } th scope="col" { (t("Source", "Sumber")) } th scope="col" { (t("Tier", "Tingkat")) } } }
+                tbody { @for x in arr(&m["first"]) { tr { td style="white-space:nowrap" { (s(&x["date"])) } td { (link_msg(&st, &user, &s(&x["ak_id"]), &s(&x["title"]))) } td { (s(&x["source"])) } td.small { (i(&x["tier"])) } } } }
+            }
             p { (t("These messages complement the ", "Pesan-pesan ini melengkapi ")) b { (t("May 1998 Sexual Violence Archive", "Arsip Kekerasan Seksual Mei 1998")) } (t(" (Nathanael Pribady), which collects the TGPF report, Tim Relawan documentation, the Indonesian and foreign press, UN records and testimony.", " (Nathanael Pribady), yang menghimpun laporan TGPF, dokumentasi Tim Relawan, pers Indonesia dan asing, catatan PBB serta kesaksian.")) }
             @if user.is_some() { p { a href="/read/collection/may-1998" { (t("Read tiers 2 and 3 →", "Baca tingkat 2 dan 3 →")) } " · " a href="/read/collection/may-1998?tier=3" { (t("the focused messages only →", "pesan terfokus saja →")) } } }
             (read_cta(&user))
@@ -626,17 +629,29 @@ pub async fn may1998(State(st): State<AppState>, MaybeUser(user): MaybeUser) -> 
 pub async fn left1965(State(st): State<AppState>, MaybeUser(user): MaybeUser) -> Markup {
     let l = st.a("left1965").clone();
     let years: Vec<String> = (1990..=2002).map(|y| y.to_string()).collect();
-    let colors = ["--accent", "--accent2", "--mixed", "--ink2", "--en", "--id", "--ink3", "--other", "--ink"];
-    let series: Vec<Series> = arr(&l["series"]).iter().enumerate().filter(|(_, x)| ["gerwani", "pki", "g30s", "pramoedya", "tapol"].contains(&s(&x["term"]).as_str())).map(|(k, x)| {
+    // a colour of its own for each term (and a dash for two of them, for those who cannot tell
+    // the colours apart)
+    let style = |term: &str| -> Option<(&'static str, bool)> {
+        match term {
+            "gerwani" => Some(("--accent", false)),
+            "pki" => Some(("--accent2", true)),
+            "g30s" => Some(("--mixed", false)),
+            "pramoedya" => Some(("--teal", false)),
+            "tapol" => Some(("--plum", true)),
+            _ => None,
+        }
+    };
+    let series: Vec<Series> = arr(&l["series"]).iter().filter_map(|x| {
+        let (color, dashed) = style(&s(&x["term"]))?;
         let y = x["yearly"].as_object().cloned().unwrap_or_default();
-        Series { name: s(&x["label"]), color: colors[k % colors.len()], values: years.iter().map(|yy| Some(y.get(yy).map(i).unwrap_or(0) as f64)).collect(), dashed: k % 2 == 1 }
+        Some(Series { name: s(&x["label"]), color, values: years.iter().map(|yy| Some(y.get(yy).map(i).unwrap_or(0) as f64)).collect(), dashed })
     }).collect();
     let body = html! {
         div.essay {
             div.kicker { (t("Case study", "Studi kasus")) }
             h1 { (t("Gerwani, the PKI and the memory of 1965", "Gerwani, PKI dan ingatan tentang 1965")) }
             p.lede { (t("How often the list named the women's movement Gerwani, the PKI, the 30 September Movement, Pramoedya and the political prisoners, year by year.", "Seberapa sering milis menyebut gerakan perempuan Gerwani, PKI, Gerakan 30 September, Pramoedya dan para tahanan politik, dari tahun ke tahun.")) }
-            div.figure.inline { h4 { (t("Messages naming each term, per year", "Pesan yang menyebut setiap istilah, per tahun")) } (charts::lines(&years, &series, false, &[], 1, 280.0)) div.src { (t("Counts are of distinct messages; ", "Hitungan berupa pesan berbeda; ")) em { "pki" } (t(" also matches inside longer words only when they begin with it.", " juga cocok di dalam kata yang lebih panjang hanya bila kata itu diawali dengannya.")) } }
+            div.figure.inline { p.ft { (t("Messages naming each term, per year", "Pesan yang menyebut setiap istilah, per tahun")) } (charts::lines(&years, &series, false, &[], 1, 280.0)) div.src { (t("Counts are of distinct messages; ", "Hitungan berupa pesan berbeda; ")) em { "pki" } (t(" also matches inside longer words only when they begin with it.", " juga cocok di dalam kata yang lebih panjang hanya bila kata itu diawali dengannya.")) } }
             h2 { (t("Every message naming Gerwani, in order", "Setiap pesan yang menyebut Gerwani, berurutan")) }
             table.t { tbody { @for x in arr(&l["gerwani_messages"]) { tr { td style="white-space:nowrap" { (s(&x["date"])) } td { (link_msg(&st, &user, &s(&x["ak_id"]), &s(&x["title"]))) } td { (s(&x["source"])) } } } } }
             @if user.is_some() { p { a href="/read/search?q=gerwani&sort=date" { (t("Search all Gerwani messages →", "Cari semua pesan tentang Gerwani →")) } } }
@@ -659,23 +674,33 @@ pub struct CatQ {
 
 pub async fn catalogue(State(st): State<AppState>, MaybeUser(user): MaybeUser, Query(q): Query<CatQ>) -> Result<Markup, AppError> {
     let per = 100i64;
-    let page_n = q.page.unwrap_or(1).max(1);
-    let ym = if q.ym.len() == 7 { q.ym.clone() } else { "1998-05".to_string() };
-    let qq = q.q.trim().to_string();
+    let page_n = q.page.unwrap_or(1).clamp(1, 500);
+    // a month written YYYY-MM, or May 1998
+    let ym = if q.ym.len() == 7 && q.ym.bytes().enumerate().all(|(i, b)| if i == 4 { b == b'-' } else { b.is_ascii_digit() }) { q.ym.clone() } else { "1998-05".to_string() };
+    let qq: String = q.q.trim().chars().take(120).collect();
+    // searches take turns (see search_turn); a month's list is a simple read
+    let _turn = if qq.is_empty() { None } else { super::search_turn().await };
     let ym2 = ym.clone();
     let can = user.as_ref().map(|u| u.can_see_sensitive()).unwrap_or(false);
-    // restricted titles are not searchable by those who may not read them
-    let vis = if can { "1 = 1" } else { "m.sensitive = 0" };
+    // restricted titles are not searchable by those who may not read them (asked of the
+    // restricted-messages index, see db::RESTRICTED_IDS)
+    let vis = if can { "1 = 1".to_string() } else { format!("m.id NOT IN {}", crate::db::RESTRICTED_IDS) };
     let (rows, total) = blocking(&st, move |c| {
         if !qq.is_empty() {
-            let fq = format!("title : ({})", qq.split_whitespace().map(|w| format!("\"{}\"*", w.replace('"', ""))).collect::<Vec<_>>().join(" AND "));
+            // at most eight words; a word of three letters or fewer is matched whole, not as a
+            // prefix (a prefix that short matches much of the vocabulary and keeps the server busy)
+            let words: Vec<String> = qq.split_whitespace().map(|w| w.replace('"', "")).filter(|w| !w.is_empty()).take(8).collect();
+            if words.is_empty() {
+                return Ok((Vec::new(), 0));
+            }
+            let fq = format!("title : ({})", words.iter().map(|w| if w.chars().count() >= 4 { format!("\"{w}\"*") } else { format!("\"{w}\"") }).collect::<Vec<_>>().join(" AND "));
             let total: i64 = c.query_row(&format!("SELECT count(*) FROM fts JOIN messages m ON m.id = fts.rowid WHERE fts MATCH ?1 AND m.counted = 1 AND {vis}"), [&fq], |r| r.get(0)).unwrap_or(0);
-            let rows: Vec<(String, Option<String>, String, Option<String>, bool)> = c.prepare(&format!("SELECT m.ak_id, m.date, m.title, m.source_code, m.sensitive FROM fts JOIN messages m ON m.id = fts.rowid WHERE fts MATCH ?1 AND m.counted = 1 AND {vis} ORDER BY m.date LIMIT {per} OFFSET {}", (page_n - 1) * per))?
+            let rows: Vec<(String, Option<String>, String, Option<String>, bool)> = c.prepare(&format!("SELECT m.ak_id, m.date, m.title, m.source_code, m.id IN (SELECT id FROM messages WHERE sensitive = 1) FROM fts JOIN messages m ON m.id = fts.rowid WHERE fts MATCH ?1 AND m.counted = 1 AND {vis} ORDER BY m.date LIMIT {per} OFFSET {}", (page_n - 1) * per))?
                 .query_map([&fq], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)? == 1)))?.collect::<rusqlite::Result<_>>()?;
             Ok((rows, total))
         } else {
             let total: i64 = c.query_row("SELECT count(*) FROM messages WHERE ym = ?1 AND counted = 1", [&ym2], |r| r.get(0))?;
-            let rows = c.prepare(&format!("SELECT ak_id, date, title, source_code, sensitive FROM messages WHERE ym = ?1 AND counted = 1 ORDER BY date, id LIMIT {per} OFFSET {}", (page_n - 1) * per))?
+            let rows = c.prepare(&format!("SELECT ak_id, date, title, source_code, id IN (SELECT id FROM messages WHERE sensitive = 1) FROM messages WHERE ym = ?1 AND counted = 1 ORDER BY date, id LIMIT {per} OFFSET {}", (page_n - 1) * per))?
                 .query_map([&ym2], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)? == 1)))?.collect::<rusqlite::Result<_>>()?;
             Ok((rows, total))
         }
@@ -702,7 +727,7 @@ pub async fn catalogue(State(st): State<AppState>, MaybeUser(user): MaybeUser, Q
             h2 { @if q.q.trim().is_empty() { (nice_date(&ym)) } @else { (t("Titles matching", "Judul yang cocok dengan")) " “" (q.q.trim()) "”" } " · " (fmt_n(total)) }
             table.t {
                 thead { tr { th { (t("Date", "Tanggal")) } th { (t("Title", "Judul")) } th { (t("Source", "Sumber")) } th { "ID" } } }
-                tbody { @for (ak, d, title, c, sens) in &rows { tr { td style="white-space:nowrap" { (d.clone().unwrap_or_default()) } td { @if *sens && !can { span.withheld { (t("Title withheld until an editor has reviewed the message", "Judul ditahan sampai editor meninjau pesan ini")) } } @else { (link_msg(&st, &user, ak, title)) } } td { (c.clone().unwrap_or_default()) } td.small { (ak) } } } }
+                tbody { @for (ak, d, title, c, sens) in &rows { tr { td style="white-space:nowrap" { (d.clone().unwrap_or_default()) } td { @if *sens && !can { span.withheld { (t("Title withheld until an editor has reviewed the message", "Judul ditahan sampai editor meninjau pesan ini")) } } @else { (link_msg(&st, &user, ak, &if can { title.clone() } else { super::read::mask_emails(title) })) } } td { (c.clone().unwrap_or_default()) } td.small { (ak) } } } }
             }
             @if pages > 1 { div.pager { @if page_n > 1 { a href=(format!("{base}&page={}", page_n - 1)) { (t("← Previous", "← Sebelumnya")) } } span.small { (t("Page", "Halaman")) " " (page_n) " " (t("of", "dari")) " " (pages) } @if page_n < pages { a href=(format!("{base}&page={}", page_n + 1)) { (t("Next →", "Berikutnya →")) } } } }
             (read_cta(&user))
@@ -716,7 +741,6 @@ pub async fn catalogue(State(st): State<AppState>, MaybeUser(user): MaybeUser, Q
 pub async fn about(State(st): State<AppState>, MaybeUser(user): MaybeUser) -> Markup {
     let o = st.a("overview").clone();
     let est = fmt_n(i(&st.a("coverage")["estimate"]));
-    let contact = st.contact.clone();
     let body = html! {
         article.essay {
             div.kicker { (t("About", "Tentang")) }
@@ -729,7 +753,8 @@ pub async fn about(State(st): State<AppState>, MaybeUser(user): MaybeUser) -> Ma
             p { (t("Reading-room access is free for research and teaching. Most messages repost articles that remain under copyright, and many name private people. Readers agree to use the texts for research, to quote within fair use, to cite the archive, and not to republish or redistribute full texts. Messages that may name survivors of sexual violence or private people are restricted to approved researchers.", "Akses ke ruang baca gratis untuk penelitian dan pengajaran. Sebagian besar pesan memuat ulang artikel yang masih dilindungi hak cipta, dan banyak yang menyebut nama orang biasa. Pembaca setuju memakai teks untuk penelitian, mengutip dalam batas penggunaan wajar, mencantumkan arsip ini sebagai sumber, dan tidak menerbitkan ulang atau menyebarkan teks lengkap. Pesan yang mungkin menyebut nama penyintas kekerasan seksual atau orang biasa hanya terbuka bagi peneliti yang disetujui.")) }
             h2 id="takedown" { (t("Corrections and takedown", "Koreksi dan penghapusan")) }
             p { (t("Authors, publishers and people named in the messages can ask for a correction, for a message to be restricted, or for its removal. Requests are answered within 30 days.", "Penulis, penerbit dan orang yang disebut dalam pesan dapat meminta koreksi, pembatasan akses sebuah pesan, atau penghapusannya. Permintaan dijawab dalam 30 hari."))
-                @if !contact.is_empty() { " " (t("Write to ", "Tulis ke ")) a href=(format!("mailto:{contact}")) { (contact) } (t(", giving the message ID.", ", dengan menyebut ID pesannya.")) } }
+                @if !layout::contacts().is_empty() { " " (t("Write to ", "Tulis ke ")) (layout::contact_links()) (t(", giving the message ID.", ", dengan menyebut ID pesannya.")) } }
+            p { (t("Researchers who need access to the archive's texts or its database for their work can write to the same addresses.", "Peneliti yang memerlukan akses ke teks arsip atau basis datanya untuk keperluan penelitian dapat menulis ke alamat yang sama.")) }
             p.small { (tf(|| format!("Archive built October 2026 · {} messages · software: a single Rust program (ingest, analysis, web server) with SQLite full-text search.", fmt_n(i(&o["messages"]))), || format!("Arsip dibangun Oktober 2026 · {} pesan · perangkat lunak: satu program Rust (pengolahan, analisis, server web) dengan pencarian teks lengkap SQLite.", fmt_n(i(&o["messages"]))))) }
         }
     };
@@ -744,8 +769,12 @@ pub struct NextQ {
     next: String,
 }
 
+/// Where to go after logging in: a path on this site only. Browsers drop tabs and line breaks
+/// from addresses and read a backslash as a slash, so any of those (or a space) anywhere makes
+/// the address unusable here, as does a second slash at the start ("//other.site").
 fn safe_next(n: &str) -> String {
-    if n.starts_with('/') && !n.starts_with("//") && !n.starts_with("/\\") { n.to_string() } else { "/read".into() }
+    let plain = n.len() <= 2000 && !n.chars().any(|c| c.is_control() || c.is_whitespace() || c == '\\');
+    if plain && n.starts_with('/') && !n.starts_with("//") { n.to_string() } else { "/read".into() }
 }
 
 fn login_page(user: Option<&auth::User>, next: &str, msg: Option<&str>) -> Markup {
@@ -780,37 +809,39 @@ pub struct LoginForm {
 }
 
 pub async fn login(State(st): State<AppState>, ClientIp(ip): ClientIp, jar: CookieJar, Form(f): Form<LoginForm>) -> Result<Response, AppError> {
-    let email = f.email.trim().to_lowercase();
-    let (kip, kacct) = (format!("login-ip:{ip}"), format!("login-acct:{email}"));
-    if st.throttle.recent(&kip, security::LOGIN_WINDOW) >= security::LOGIN_PER_IP || st.throttle.recent(&kacct, security::LOGIN_WINDOW) >= security::LOGIN_PER_ACCOUNT {
+    let email: String = f.email.trim().to_lowercase().chars().take(254).collect();
+    // failures per address, per account from one address, and per account from everywhere:
+    // the last one is set high, so that nobody can lock an editor out from a single address
+    let (kip, kpair, kacct) = (format!("login-ip:{ip}"), format!("login-pair:{email}:{ip}"), format!("login-acct:{email}"));
+    if st.throttle.recent(&kip, security::LOGIN_WINDOW) >= security::LOGIN_PER_IP
+        || st.throttle.recent(&kpair, security::LOGIN_WINDOW) >= security::LOGIN_PER_ACCOUNT
+        || st.throttle.recent(&kacct, security::LOGIN_WINDOW) >= security::LOGIN_PER_ACCOUNT_ALL
+    {
         return Ok(login_page(None, &safe_next(&f.next), Some(t("Too many attempts. Please wait 15 minutes and try again.", "Terlalu banyak percobaan. Tunggu 15 menit lalu coba lagi."))).into_response());
     }
-    let pw = f.password.clone();
+    // counted before the check, so attempts sent all at once are counted too; taken back if
+    // the password is right
+    for k in [&kip, &kpair, &kacct] {
+        st.throttle.note(k);
+    }
     let e2 = email.clone();
     let acct = site(&st, move |c| c.account_by_email(&e2)).await?;
-    let verdict = tokio::task::spawn_blocking(move || match acct {
-        Some(a) if auth::verify_password(&pw, &a.pw_hash) => Some(a),
-        Some(_) => None,
-        None => {
-            auth::verify_dummy(&pw);
-            None
-        }
-    })
-    .await
-    .map_err(|e| AppError(e.to_string()))?;
+    let hash = acct.as_ref().map(|a| a.pw_hash.clone());
+    let verdict = if auth::check_password(f.password.clone(), hash).await { acct } else { None };
     match verdict {
-        Some(a) if !a.approved => Ok(login_page(None, &safe_next(&f.next), Some(t("Your account is waiting for an editor's approval.", "Akun Anda sedang menunggu persetujuan editor."))).into_response()),
         Some(a) => {
-            st.throttle.clear(&kacct);
+            for k in [&kip, &kpair, &kacct] {
+                st.throttle.forget_last(k);
+            }
+            if !a.approved {
+                return Ok(login_page(None, &safe_next(&f.next), Some(t("Your account is waiting for an editor's approval.", "Akun Anda sedang menunggu persetujuan editor."))).into_response());
+            }
+            st.throttle.clear(&kpair);
             let id = a.id;
             let token = site(&st, move |c| c.create_session(id)).await?;
             Ok((jar.add(auth::session_cookie(token, st.secure_cookies)), Redirect::to(&safe_next(&f.next))).into_response())
         }
-        None => {
-            st.throttle.note(&kip);
-            st.throttle.note(&kacct);
-            Ok(login_page(None, &safe_next(&f.next), Some(t("That email and password do not match.", "Email dan kata sandi itu tidak cocok."))).into_response())
-        }
+        None => Ok(login_page(None, &safe_next(&f.next), Some(t("That email and password do not match.", "Email dan kata sandi itu tidak cocok."))).into_response()),
     }
 }
 
@@ -880,7 +911,7 @@ pub async fn register(State(st): State<AppState>, ClientIp(ip): ClientIp, jar: C
     st.throttle.note(&key);
     let approval = st.approval;
     let pw = f.password.clone();
-    let hash = tokio::task::spawn_blocking(move || auth::hash_password(&pw)).await.map_err(|e| AppError(e.to_string()))?;
+    let hash = auth::new_hash(pw).await?;
     let res = site(&st, move |c| {
         if c.account_by_email(&email)?.is_some() {
             return Ok(None);

@@ -11,7 +11,7 @@
 set -e
 cd "$(dirname "$0")"
 SCHEMA=4
-MIN_RUST=85 # Rust 1.85 or newer
+MIN_RUST=88 # Rust 1.88 or newer
 MODE="${1:-}"
 
 say() { printf '\n== %s\n' "$*"; }

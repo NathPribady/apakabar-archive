@@ -65,12 +65,13 @@ pub async fn change_password(State(st): State<AppState>, Reader(u): Reader, jar:
     }
     let uid = u.id;
     let acct = site(&st, move |c| c.account_by_id(uid)).await?;
-    let ok = acct.map(|a| auth::verify_password(&f.current, &a.pw_hash)).unwrap_or(false);
-    if !ok {
-        st.throttle.note(&key);
+    // counted before the check, so attempts sent all at once are counted too
+    st.throttle.note(&key);
+    if !auth::check_password(f.current.clone(), acct.map(|a| a.pw_hash)).await {
         return Ok(account_page(&u, Some((t("The current password is not right.", "Kata sandi sekarang tidak tepat."), false))).into_response());
     }
-    let hash = auth::hash_password(&f.password);
+    st.throttle.forget_last(&key);
+    let hash = auth::new_hash(f.password.clone()).await?;
     let token = site(&st, move |c| {
         c.set_password(uid, &hash)?;
         c.delete_sessions_of(uid)?;
@@ -133,7 +134,7 @@ pub async fn reset(State(st): State<AppState>, ClientIp(ip): ClientIp, Path(toke
     if f.password.chars().count() < MIN_PASSWORD || f.password != f.again {
         return Ok(reset_page(None, &token, Some(&acct.email), Some((&too_short(), false)), false));
     }
-    let hash = auth::hash_password(&f.password);
+    let hash = auth::new_hash(f.password.clone()).await?;
     let tk = token.clone();
     let done = site(&st, move |c| {
         let r = c.use_reset(&tk, &hash)?;
@@ -205,19 +206,38 @@ pub async fn setup(State(st): State<AppState>, jar: CookieJar, Form(f): Form<Set
     if f.password.chars().count() < MIN_PASSWORD || f.password != f.again || !email.contains('@') || f.name.trim().is_empty() {
         return Ok(setup_page(&f.token, Some((&too_short(), false))).into_response());
     }
-    let hash = auth::hash_password(&f.password);
-    let name = f.name.trim().to_string();
-    let token = site(&st, move |c| {
-        if c.count_admins()? > 0 {
-            return Ok(None);
+    // the link works once: it is taken before the account is made, so two forms sent at the
+    // same moment cannot both create one
+    let claimed = {
+        let mut s = st.setup.lock().unwrap();
+        if s.as_deref().map(|t| security::same(t, &f.token)).unwrap_or(false) { s.take() } else { None }
+    };
+    let Some(link) = claimed else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    let made = async {
+        let hash = auth::new_hash(f.password.clone()).await?;
+        let name = f.name.trim().to_string();
+        site(&st, move |c| {
+            if c.count_admins()? > 0 {
+                return Ok(None);
+            }
+            c.upsert_account(&email, &name, &hash, "admin")?;
+            let id = c.account_by_email(&email)?.map(|a| a.id).unwrap_or(0);
+            c.audit(id, "editor account created", "setup link")?;
+            Ok(Some(c.create_session(id)?))
+        })
+        .await
+    }
+    .await;
+    let token = match made {
+        Ok(t) => t,
+        Err(e) => {
+            // nothing was made: the link stays valid
+            *st.setup.lock().unwrap() = Some(link);
+            return Err(e);
         }
-        c.upsert_account(&email, &name, &hash, "admin")?;
-        let id = c.account_by_email(&email)?.map(|a| a.id).unwrap_or(0);
-        c.audit(id, "editor account created", "setup link")?;
-        Ok(Some(c.create_session(id)?))
-    })
-    .await?;
-    *st.setup.lock().unwrap() = None;
+    };
     match token {
         Some(tok) => Ok((jar.add(auth::session_cookie(tok, st.secure_cookies)), Redirect::to("/admin")).into_response()),
         None => Ok(Redirect::to("/login").into_response()),

@@ -16,9 +16,23 @@
 *.db-shm
 *.db-wal
 
-# Editors working notes on single messages, among them the May 1998 messages that identify survivors
+# Editors working notes on single messages, among them the May 1998 messages that identify survivors,
+# and anything made from them (the model's training files)
 /tools/first_pass_review.json
 /tools/first_pass_checks.json
+/tools/*.jsonl
+*.jsonl
+
+# Secrets and other databases: never in the repository
+.env
+.env.*
+*.pem
+*.key
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.dump
+*.sql.gz
 
 # Logs, bundles and local state
 *.log

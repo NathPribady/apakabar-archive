@@ -47,6 +47,31 @@ pub fn verify_dummy(pw: &str) {
     let _ = verify_password(pw, "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHRzb21lc2FsdA$Xj3oL9pr8Oe1qY3Qx2Q0kEo3m5pY8n1d3c0k8Z0n2aA");
 }
 
+/// Argon2 takes 19 MiB of memory per password. The server works on two at a time, so a
+/// flood of login attempts waits its turn instead of using up the machine's memory.
+static HASHING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// Check a password off the async threads, two at a time. Without an account (`None`) the
+/// same work is done on a dummy hash, so a wrong email takes as long as a wrong password.
+pub async fn check_password(pw: String, hash: Option<String>) -> bool {
+    let _turn = HASHING.acquire().await.ok();
+    tokio::task::spawn_blocking(move || match hash {
+        Some(h) => verify_password(&pw, &h),
+        None => {
+            verify_dummy(&pw);
+            false
+        }
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Hash a new password off the async threads, two at a time.
+pub async fn new_hash(pw: String) -> std::result::Result<String, super::AppError> {
+    let _turn = HASHING.acquire().await.ok();
+    tokio::task::spawn_blocking(move || hash_password(&pw)).await.map_err(|e| super::AppError(e.to_string()))
+}
+
 pub fn session_cookie(token: String, secure: bool) -> Cookie<'static> {
     let mut ck = Cookie::new(COOKIE, token);
     ck.set_http_only(true);

@@ -20,21 +20,28 @@ use axum::{
     Router,
 };
 use serde_json::{json, Value};
+use once_cell::sync::Lazy;
+use rusqlite::OptionalExtension;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 /// Messages ordinary readers may not open: the May 1998 messages no editor has reviewed yet,
 /// and those the editors restricted. Researchers and editors see everything.
 #[derive(Default, Debug)]
 pub struct Restricted {
+    /// May 1998 messages no editor has decided on yet
     pub pending: HashSet<String>,
+    /// messages an editor marked sensitive
     pub sensitive: HashSet<String>,
+    /// both, with every copy of each text: what readers may not open
+    pub all: HashSet<String>,
 }
 impl Restricted {
     pub fn hidden(&self, ak: &str) -> bool {
-        self.pending.contains(ak) || self.sensitive.contains(ak)
+        self.all.contains(ak)
     }
 }
 
@@ -53,7 +60,6 @@ pub struct AppState {
     pub trust_proxy: bool,
     pub base_url: Option<String>,
     pub base_host: Option<String>,
-    pub contact: String,
     pub throttle: Arc<security::Throttle>,
     /// a one-time link to create the first editor account, while there is none
     pub setup: Arc<Mutex<Option<String>>>,
@@ -81,15 +87,61 @@ impl AppState {
     }
 }
 
-/// Run blocking work on the archive database off the async threads.
+/// Archive queries still running after this long are stopped: no reader should wait for one,
+/// and a query built to keep the server busy must not.
+pub const QUERY_LIMIT: Duration = Duration::from_secs(20);
+
+/// The queries running, with their deadlines; one thread stops those past it.
+static RUNNING: Lazy<Mutex<(u64, HashMap<u64, (Instant, rusqlite::InterruptHandle)>)>> = Lazy::new(|| {
+    std::thread::spawn(|| loop {
+        std::thread::sleep(Duration::from_millis(250));
+        let now = Instant::now();
+        RUNNING.lock().unwrap_or_else(|e| e.into_inner()).1.retain(|_, (deadline, h)| {
+            if now >= *deadline {
+                h.interrupt();
+                false
+            } else {
+                true
+            }
+        });
+    });
+    Mutex::new((0, HashMap::new()))
+});
+
+/// A query under watch; dropped (also when the work panics) before its connection goes back
+/// to the pool, so the watchdog never stops a later query on that connection.
+struct Watched(u64);
+
+impl Drop for Watched {
+    fn drop(&mut self) {
+        RUNNING.lock().unwrap_or_else(|e| e.into_inner()).1.remove(&self.0);
+    }
+}
+
+/// Run blocking work on the archive database off the async threads, within QUERY_LIMIT.
 pub async fn blocking<T: Send + 'static>(state: &AppState, f: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T> + Send + 'static) -> std::result::Result<T, AppError> {
     let pool = state.pool.clone();
     tokio::task::spawn_blocking(move || {
         let c = pool.get().map_err(|e| AppError(e.to_string()))?;
+        let _watch = {
+            let mut r = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+            r.0 += 1;
+            let id = r.0;
+            r.1.insert(id, (Instant::now() + QUERY_LIMIT, c.get_interrupt_handle()));
+            Watched(id)
+        };
         f(&c).map_err(|e| AppError(e.to_string()))
     })
     .await
     .map_err(|e| AppError(e.to_string()))?
+}
+
+/// Full-text searches run three at a time (readers' and the catalogue's together), so they
+/// never hold every connection to the archive: pages keep loading while searches wait.
+static SEARCHES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(3);
+
+pub async fn search_turn() -> Option<tokio::sync::SemaphorePermit<'static>> {
+    SEARCHES.acquire().await.ok()
 }
 
 /// Run blocking work on the site store off the async threads.
@@ -107,6 +159,14 @@ pub async fn site<T: Send + 'static>(state: &AppState, f: impl FnOnce(&mut SiteC
 pub struct AppError(pub String);
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        if self.0 == "bad date" || self.0 == "bad month" {
+            // an address that names no real day or month
+            return (StatusCode::NOT_FOUND, i18n::t("No such date.", "Tanggal itu tidak ada.").to_string()).into_response();
+        }
+        if self.0.contains("interrupted") {
+            // stopped by QUERY_LIMIT
+            return (StatusCode::SERVICE_UNAVAILABLE, i18n::t("That took too long. Please try again, or narrow the search.", "Terlalu lama. Silakan coba lagi, atau persempit pencarian.").to_string()).into_response();
+        }
         eprintln!("error: {}", self.0);
         (StatusCode::INTERNAL_SERVER_ERROR, i18n::t("Something went wrong. Please try again.", "Terjadi kesalahan. Silakan coba lagi.").to_string()).into_response()
     }
@@ -122,15 +182,30 @@ impl From<site::SiteError> for AppError {
     }
 }
 
+/// The stylesheet, addressed by a hash of its content (/style.css?v=…), so browsers may keep
+/// it for a year and still get the new one after a change.
 async fn css() -> impl IntoResponse {
     let mut h = HeaderMap::new();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/css; charset=utf-8"));
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=86400"));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable"));
     (h, layout::CSS)
 }
 
-async fn robots() -> &'static str {
-    "User-agent: *\nDisallow: /read\nDisallow: /login\nDisallow: /register\nDisallow: /account\nDisallow: /reset\nDisallow: /setup\nDisallow: /admin\n"
+async fn robots() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], security::robots_txt())
+}
+
+/// TDMRep (W3C): text and data mining rights are reserved for every page.
+async fn tdmrep() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "application/json")], r#"[{"location":"/*","tdm-reservation":1}]"#)
+}
+
+/// Every answer within 30 seconds (the archive queries stop at 20; see QUERY_LIMIT).
+async fn time_limit(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    match tokio::time::timeout(Duration::from_secs(30), next.run(req)).await {
+        Ok(r) => r,
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, i18n::t("The server took too long to answer. Please try again.", "Server terlalu lama menjawab. Silakan coba lagi.").to_string()).into_response(),
+    }
 }
 
 pub fn load_analysis(conn: &rusqlite::Connection) -> HashMap<String, Value> {
@@ -152,6 +227,7 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(public::home))
         .route("/style.css", get(css))
         .route("/robots.txt", get(robots))
+        .route("/.well-known/tdmrep.json", get(tdmrep))
         .route("/analysis/themes", get(public::themes))
         .route("/analysis/sources", get(public::sources))
         .route("/analysis/events", get(public::events))
@@ -191,6 +267,7 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/review", get(review::page).post(review::decide))
         .route("/admin/checks", get(admin::checks))
         .route("/admin/checks/:key", get(admin::check_set).post(admin::save_check_set))
+        .layer(axum::middleware::from_fn(time_limit))
         .layer(tower_http::compression::CompressionLayer::new())
         .layer(axum::middleware::from_fn_with_state(state.clone(), security::context))
         .with_state(state)
@@ -282,9 +359,37 @@ pub fn refresh_restricted(archive: &rusqlite::Connection, site: &SiteDb) -> std:
     let sensitive: HashSet<String> = sensitive.into_iter().map(|x| x.0).collect();
     let tiered: Vec<String> = archive.prepare("SELECT ak_id FROM messages WHERE may98_tier >= 2")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
     let pending: HashSet<String> = tiered.into_iter().filter(|a| !decided.contains_key(a)).collect();
-    let all: HashSet<String> = pending.union(&sensitive).cloned().collect();
+    // a text is restricted in every copy: the flags of one copy cover its duplicates
+    let all = with_copies(archive, &pending.union(&sensitive).cloned().collect())?;
     db::apply_restricted(archive, &all)?;
-    Ok(Restricted { pending, sensitive })
+    Ok(Restricted { pending, sensitive, all })
+}
+
+/// The AK IDs of a text: the original and every exact or near-identical copy of it.
+pub fn copies_of(archive: &rusqlite::Connection, ak: &str) -> rusqlite::Result<Vec<String>> {
+    let mut one = HashSet::new();
+    one.insert(ak.to_string());
+    let mut v: Vec<String> = with_copies(archive, &one)?.into_iter().collect();
+    v.sort();
+    Ok(v)
+}
+
+fn with_copies(archive: &rusqlite::Connection, aks: &HashSet<String>) -> rusqlite::Result<HashSet<String>> {
+    let mut root = archive.prepare("SELECT coalesce(dup_of, id) FROM messages WHERE ak_id = ?1")?;
+    let mut roots: HashSet<i64> = HashSet::new();
+    for a in aks {
+        if let Some(r) = root.query_row([a], |r| r.get(0)).optional()? {
+            roots.insert(r);
+        }
+    }
+    let mut members = archive.prepare("SELECT ak_id FROM messages WHERE id = ?1 UNION SELECT ak_id FROM messages WHERE dup_of = ?1")?;
+    let mut out = aks.clone();
+    for r in roots {
+        for a in members.query_map([r], |r| r.get::<_, String>(0))? {
+            out.insert(a?);
+        }
+    }
+    Ok(out)
 }
 
 /// Recount after an editor's decision.
@@ -322,6 +427,7 @@ pub fn state(o: &ServeOpts) -> Result<AppState> {
     if db::ensure_start_indexes(db_path)? {
         eprintln!("archive database: added the indexes the start-up uses (once)");
     }
+    layout::set_contacts(&o.contact);
     let site_db = SiteDb::for_archive(db_path, o.site.as_deref(), None)?;
     eprintln!("site store: {}", site_db.describe());
     if let Some(t) = site::tools_dir() {
@@ -377,7 +483,6 @@ pub fn state(o: &ServeOpts) -> Result<AppState> {
         trust_proxy: o.trust_proxy,
         base_url,
         base_host,
-        contact: o.contact.clone(),
         throttle: Arc::new(security::Throttle::default()),
         setup: Arc::new(Mutex::new(setup)),
         content: o.content.clone(),

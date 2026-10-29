@@ -7,7 +7,7 @@
 use super::auth::{Reader, User};
 use super::charts;
 use super::i18n::{self, lang_label, month_short, t, tf, type_label};
-use super::layout::{csrf_field, fmt_n, nice_date, page};
+use super::layout::{self, csrf_field, fmt_n, nice_date, page};
 use super::{blocking, site, AppError, AppState};
 use crate::{lexicon, sources, text};
 use axum::{
@@ -40,7 +40,9 @@ pub struct Row {
     pub restricted: bool,
 }
 
-const ROW_COLS: &str = "m.ak_id, m.date, m.title, m.source_code, m.source_name, m.lang, m.msg_type, m.words, m.dup_of IS NOT NULL, m.title_source, m.topic, m.sensitive";
+/// The columns of a listed message. The last one says whether it is restricted, asked of the
+/// restricted-messages index rather than read from the row (see `db::RESTRICTED_IDS`).
+const ROW_COLS: &str = "m.ak_id, m.date, m.title, m.source_code, m.source_name, m.lang, m.msg_type, m.words, m.dup_of IS NOT NULL, m.title_source, m.topic, m.id IN (SELECT id FROM messages WHERE sensitive = 1)";
 
 fn row(r: &rusqlite::Row, snippet: bool) -> rusqlite::Result<Row> {
     Ok(Row {
@@ -62,18 +64,22 @@ fn row(r: &rusqlite::Row, snippet: bool) -> rusqlite::Result<Row> {
 
 /// The SQL condition that hides restricted messages from readers.
 fn visible(u: &User) -> &'static str {
-    if u.can_see_sensitive() { "1 = 1" } else { "m.sensitive = 0" }
+    if u.can_see_sensitive() { "1 = 1" } else { "m.id NOT IN (SELECT id FROM messages WHERE sensitive = 1)" }
 }
 
 // ---------------------------------------------------------------- privacy
 
 static EMAIL: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b([a-z0-9][a-z0-9._%+-]*)@([a-z0-9-]+(?:\.[a-z0-9-]+)+)").unwrap());
+/// An address with search highlights (\u{1}..\u{2}) inside it.
+static EMAIL_MARKED: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)[a-z0-9\x{1}\x{2}][a-z0-9._%+\x{1}\x{2}-]*@[a-z0-9\x{1}\x{2}-]+(?:\.[a-z0-9\x{1}\x{2}-]+)+").unwrap());
 
 /// Hide the personal part of email addresses ("•••@igc.apc.org"). The list's own addresses
 /// (apakabar@…, indonesia-l@…) stay, since they are part of the record.
 pub fn mask_emails(s: &str) -> String {
+    // highlights inside an address would hide it from the pattern: an address loses them
+    let s: std::borrow::Cow<str> = if s.contains(['\u{1}', '\u{2}']) { EMAIL_MARKED.replace_all(s, |c: &regex::Captures| c[0].replace(['\u{1}', '\u{2}'], "")) } else { std::borrow::Cow::Borrowed(s) };
     EMAIL
-        .replace_all(s, |c: &regex::Captures| {
+        .replace_all(&s, |c: &regex::Captures| {
             let local = c[1].to_ascii_lowercase();
             if local.starts_with("apakabar") || local.starts_with("indonesia-") || local.starts_with("reg.") || local == "majordomo" || local == "listserv" {
                 c[0].to_string()
@@ -184,8 +190,8 @@ pub async fn home(State(st): State<AppState>, Reader(u): Reader) -> Result<Marku
                         @let k = format!("{y}-{mo:02}");
                         @match cal.get(&k) {
                             Some(n) => {
-                                @let a = ((*n as f64 / max).sqrt() * 100.0).round();
-                                a href=(format!("/read/month/{k}")) title=(format!("{}: {} {}", charts::nice_ym(&k), fmt_n(*n), t("messages", "pesan"))) style=(format!("background:color-mix(in srgb, var(--accent) {a}%, var(--chip));color:{}", if a > 60.0 { "var(--paper)" } else { "var(--ink)" })) { (if *n >= 1000 { format!("{}{}", i18n::dec(*n as f64 / 1000.0, 1), t("k", " rb")) } else { n.to_string() }) }
+                                @let a = ((*n as f64 / max).sqrt() * 48.0).round();
+                                a href=(format!("/read/month/{k}")) title=(format!("{}: {} {}", charts::nice_ym(&k), fmt_n(*n), t("messages", "pesan"))) style=(format!("background:color-mix(in srgb, var(--accent) {a}%, var(--chip))")) { (if *n >= 1000 { format!("{}{}", i18n::dec(*n as f64 / 1000.0, 1), t("k", " rb")) } else { n.to_string() }) }
                             }
                             None => span style="background:var(--chip);opacity:.35" { "" }
                         }
@@ -310,10 +316,19 @@ static WORD: Lazy<Regex> = Lazy::new(|| Regex::new(r#"(-?)"([^"]+)"|(-?)([\p{L}\
 /// matches its Indonesian stem ("perkosaan" finds "diperkosa"); "quoted phrases" stay
 /// phrases; a leading minus excludes; OR between two words is kept.
 pub fn fts_query(input: &str) -> Option<String> {
+    // a bounded query: 200 characters, 12 terms (an unbounded one can keep the server busy)
+    let input: String = input.chars().take(200).collect();
+    let input = input.as_str();
     let mut parts: Vec<String> = Vec::new();
     let mut pending_or = false;
+    let mut terms = 0;
     for m in WORD.captures_iter(input) {
+        // every word counts, those joined by OR too
+        if terms >= 12 {
+            break;
+        }
         if let Some(ph) = m.get(2) {
+            terms += 1;
             let neg = !m.get(1).map(|x| x.as_str()).unwrap_or("").is_empty();
             let p = format!("\"{}\"", ph.as_str().replace('"', ""));
             push(&mut parts, if neg { format!("NOT {p}") } else { p }, &mut pending_or);
@@ -331,8 +346,10 @@ pub fn fts_query(input: &str) -> Option<String> {
             if lw.is_empty() {
                 continue;
             }
+            terms += 1;
             let st = text::stem(&lw);
-            let term = if lw.chars().count() >= 3 { format!("\"{}\"*", lw) } else { format!("\"{}\"", lw) };
+            // a prefix of three letters ("ber*") would match a large part of the vocabulary
+            let term = if lw.chars().count() >= 4 { format!("\"{}\"*", lw) } else { format!("\"{}\"", lw) };
             let expr = if st != lw && st.chars().count() >= 3 { format!("({term} OR stems:\"{st}\")") } else { term };
             push(&mut parts, if neg { format!("NOT {expr}") } else { expr }, &mut pending_or);
         }
@@ -346,6 +363,7 @@ pub fn fts_query(input: &str) -> Option<String> {
         }
         *pending_or = false;
     }
+    parts.truncate(12);
     // NOT cannot start an FTS5 query
     let pos: Vec<&String> = parts.iter().filter(|p| !p.starts_with("NOT")).collect();
     if pos.is_empty() {
@@ -360,10 +378,11 @@ pub fn fts_query(input: &str) -> Option<String> {
 
 pub async fn search(State(st): State<AppState>, Reader(u): Reader, Query(q): Query<SearchQ>) -> Result<Markup, AppError> {
     let per = 30i64;
-    let page_n = q.page.unwrap_or(1).max(1);
+    let page_n = q.page.unwrap_or(1).clamp(1, 2000);
     let fq = fts_query(&q.q);
     let q2 = q.clone();
     let vis = visible(&u);
+    let _turn = super::search_turn().await;
     let res = blocking(&st, move |c| {
         let mut wh: Vec<String> = vec![vis.to_string()];
         let mut args: Vec<rusqlite::types::Value> = Vec::new();
@@ -414,7 +433,7 @@ pub async fn search(State(st): State<AppState>, Reader(u): Reader, Query(q): Que
         "/read/search?q={}&from={}&to={}&source={}&lang={}&type={}&theme={}&sort={}&dups={}&coll={}",
         urlencoding::encode(&q.q), q.from, q.to, urlencoding::encode(&q.source), q.lang, q.r#type, q.theme, q.sort, q.dups, q.coll
     );
-    let ymax = years.iter().map(|y| y.1).max().unwrap_or(1).max(1);
+    let ymax = years.iter().map(|y| y.1).max().unwrap_or(1).clamp(1, 2000);
     let body = html! {
         div.wide {
             div.kicker { (kicker_home()) " / " (t("search", "pencarian")) }
@@ -425,7 +444,7 @@ pub async fn search(State(st): State<AppState>, Reader(u): Reader, Query(q): Que
                 p { b { (if total > 20000 { t("More than 20,000", "Lebih dari 20.000").to_string() } else { fmt_n(total) }) } " " (t("messages", "pesan")) @if q.dups != "1" { " " (t("(duplicate copies hidden)", "(salinan ganda disembunyikan)")) } "." }
                 @if !years.is_empty() {
                     div.figure.inline {
-                        h4 { (t("Results by year", "Hasil per tahun")) }
+                        h2.minor { (t("Results by year", "Hasil per tahun")) }
                         div style="display:grid;grid-template-columns:repeat(13,1fr);gap:4px;align-items:end;height:80px" {
                             @for y in 1990..=2002 {
                                 @let n = years.iter().find(|x| x.0 == y).map(|x| x.1).unwrap_or(0);
@@ -505,10 +524,12 @@ fn load_msg(c: &rusqlite::Connection, ak_id: &str) -> rusqlite::Result<Option<Ms
 }
 
 fn render_body(body: &str, hl: &str) -> Markup {
+    let hl: String = hl.chars().take(200).collect();
     let terms: Vec<String> = WORD
-        .captures_iter(hl)
+        .captures_iter(&hl)
         .filter_map(|m| m.get(2).or(m.get(4)).map(|x| x.as_str().to_string()))
         .filter(|w| w.chars().count() >= 3 && w != "AND" && w != "OR")
+        .take(12)
         .collect();
     let re = if terms.is_empty() {
         None
@@ -517,12 +538,13 @@ fn render_body(body: &str, hl: &str) -> Markup {
             let st = text::stem(&tm.to_lowercase());
             if st != tm.to_lowercase() && st.chars().count() >= 3 { format!("{}|\\w*{}\\w*", regex::escape(tm), regex::escape(&st)) } else { format!("{}\\w*", regex::escape(tm)) }
         }).collect();
-        Regex::new(&format!("(?i)\\b(?:{})", alts.join("|"))).ok()
+        // entities (&amp; &quot;) are matched first and left alone
+        Regex::new(&format!("(?i)&#?[a-z0-9]+;|\\b(?:{})", alts.join("|"))).ok()
     };
     let mark = |s: &str| -> PreEscaped<String> {
         let e = html! { (s) }.into_string();
         match &re {
-            Some(re) => PreEscaped(re.replace_all(&e, "<mark>$0</mark>").into_owned()),
+            Some(re) => PreEscaped(re.replace_all(&e, |c: &regex::Captures| if c[0].starts_with('&') { c[0].to_string() } else { format!("<mark>{}</mark>", &c[0]) }).into_owned()),
             None => PreEscaped(e),
         }
     };
@@ -536,8 +558,9 @@ fn render_body(body: &str, hl: &str) -> Markup {
     }
 }
 
-/// APA and Chicago citations (English, as both styles are).
-fn citation(m: &Msg) -> (String, String) {
+/// APA and Chicago citations (English, as both styles are), pointing to the message's
+/// permanent page on this site.
+fn citation(m: &Msg, url: &str) -> (String, String) {
     let author = m.orig_from.as_deref().filter(|s| !s.is_empty()).map(|s| s.split('<').next().unwrap_or(s).trim().trim_matches('"').to_string()).filter(|s| !s.is_empty() && !s.contains('@')).unwrap_or_else(|| "apakabar".into());
     let (y, md) = match &m.date {
         Some(d) => {
@@ -550,16 +573,15 @@ fn citation(m: &Msg) -> (String, String) {
         let mo: usize = d[5..7].parse().unwrap_or(1);
         format!("{} {} {}", d[8..10].trim_start_matches('0'), i18n::MONTHS_LONG_EN[mo.clamp(1, 12) - 1], &d[..4])
     });
-    let url = m.wayback.clone().unwrap_or_default();
-    let apa = format!("{author}. ({y}{}). {} [Mailing list message, {}]. apakabar (Indonesia Publications, ed. J. A. MacDougall). {url}", if md.is_empty() { String::new() } else { format!(", {md}") }, m.title, m.ak_id);
-    let chicago = format!("{}\u{201C}{},\u{201D} apakabar mailing list (ed. John A. MacDougall), {}, {}, {url}.", if author == "apakabar" { String::new() } else { format!("{author}, ") }, m.title, en_date.unwrap_or_else(|| "n.d.".into()), m.ak_id);
+    let apa = format!("{author}. ({y}{}). {} [Mailing list message, {}]. apakabar (Indonesia Publications, ed. J. A. MacDougall). Apakabar Archive. {url}", if md.is_empty() { String::new() } else { format!(", {md}") }, m.title, m.ak_id);
+    let chicago = format!("{}\u{201C}{},\u{201D} apakabar mailing list (ed. John A. MacDougall), {}, {}, Apakabar Archive, {url}.", if author == "apakabar" { String::new() } else { format!("{author}, ") }, m.title, en_date.unwrap_or_else(|| "n.d.".into()), m.ak_id);
     (apa, chicago)
 }
 
 fn limit_page(u: &User) -> Markup {
     page(t("Daily limit", "Batas harian"), Some(u), "read", html! { div.essay {
         h1 { (t("Daily reading limit reached", "Batas baca harian tercapai")) }
-        p { (tf(|| format!("To protect the archive from bulk copying, each account can open {DAILY_LIMIT} messages a day. Please continue tomorrow, or write to the editors if your research needs more."), || format!("Untuk melindungi arsip dari penyalinan massal, setiap akun dapat membuka {DAILY_LIMIT} pesan per hari. Silakan lanjutkan besok, atau hubungi editor bila penelitian Anda memerlukan lebih."))) }
+        p { (tf(|| format!("To protect the archive from bulk copying, each account can open {DAILY_LIMIT} messages a day. Please continue tomorrow, or write to the editors if your research needs more."), || format!("Untuk melindungi arsip dari penyalinan massal, setiap akun dapat membuka {DAILY_LIMIT} pesan per hari. Silakan lanjutkan besok, atau hubungi editor bila penelitian Anda memerlukan lebih."))) @if !layout::contacts().is_empty() { " " (layout::contact_links()) "." } }
     } })
 }
 
@@ -607,13 +629,18 @@ pub async fn message(State(st): State<AppState>, Reader(u): Reader, Path(ak_id):
             div.essay {
                 div.small { (m.ak_id) @if let Some(d) = &m.date { " · " (nice_date(d)) } }
                 h1 { (t("Restricted message", "Pesan terbatas")) }
-                div.note { (t("This message may name survivors of sexual violence or private people. It is open to approved researchers; until an editor has reviewed it, its title and text are withheld. Write to the editors if your research needs it.", "Pesan ini mungkin menyebut nama penyintas kekerasan seksual atau orang biasa. Pesan ini terbuka bagi peneliti yang disetujui; selama belum ditinjau editor, judul dan isinya ditahan. Hubungi editor bila penelitian Anda memerlukannya.")) }
+                div.note { (t("This message may name survivors of sexual violence or private people. It is open to approved researchers; until an editor has reviewed it, its title and text are withheld. Write to the editors if your research needs it", "Pesan ini mungkin menyebut nama penyintas kekerasan seksual atau orang biasa. Pesan ini terbuka bagi peneliti yang disetujui; selama belum ditinjau editor, judul dan isinya ditahan. Hubungi editor bila penelitian Anda memerlukannya")) @if !layout::contacts().is_empty() { ": " (layout::contact_links()) } "." }
                 p { a href="/read" { (t("Back to the reading room", "Kembali ke ruang baca")) } }
             }
         };
         return Ok(page(t("Restricted message", "Pesan terbatas"), Some(&u), "read", body).into_response());
     }
-    let (apa, chicago) = citation(&m);
+    // marked by an editor: this message or any copy of it (the mark covers them all)
+    let marked = {
+        let r = st.restricted.read().unwrap();
+        r.sensitive.contains(&m.ak_id) || copies.iter().any(|c| r.sensitive.contains(&c.ak_id))
+    };
+    let (apa, chicago) = citation(&m, &st.url(&format!("/read/m/{}", m.ak_id)));
     let (apa, chicago) = (shown(&u, &apa), shown(&u, &chicago));
     let tier_label = match m.may_tier {
         3 => t("focused on the sexual violence of May 1998", "berfokus pada kekerasan seksual Mei 1998"),
@@ -630,8 +657,8 @@ pub async fn message(State(st): State<AppState>, Reader(u): Reader, Path(ak_id):
         div.reader {
             article.msg {
                 div.small { (m.ak_id) @if let Some(tg) = &m.list_tag { " · " (tg) } @if m.topic_reply { " · " (t("reply under a conference topic", "balasan di bawah topik konferensi")) } @if m.sensitive { " · " span.chip { (t("restricted to researchers", "hanya untuk peneliti")) } } }
-                h1 { (m.title) }
-                @if let Some(n) = m.title_source.as_deref().and_then(title_note) { p.small.titlenote { (n) ". " (t("Subject as posted", "Subjek asli")) ": \u{201c}" (m.subject) "\u{201d}" } }
+                h1 { (shown(&u, &m.title)) }
+                @if let Some(n) = m.title_source.as_deref().and_then(title_note) { p.small.titlenote { (n) ". " (t("Subject as posted", "Subjek asli")) ": \u{201c}" (shown(&u, &m.subject)) "\u{201d}" } }
                 div.byline {
                     @if let Some(d) = &m.date { (nice_date(d)) }
                     @if let Some(n) = &m.source_name { " · " (n) } @else if let Some(c) = &m.code { " · " (c) }
@@ -644,15 +671,15 @@ pub async fn message(State(st): State<AppState>, Reader(u): Reader, Path(ak_id):
                     details { summary { (t("Mail headers inside the message", "Kepala surat di dalam pesan")) } pre.raw { (shown(&u, h)) } }
                 }
                 div.pager.noprint {
-                    @if let Some((id, tt)) = &prev { a href=(format!("/read/m/{id}")) title=(tt) { (t("← Previous message", "← Pesan sebelumnya")) } }
-                    @if let Some((id, tt)) = &next { a href=(format!("/read/m/{id}")) title=(tt) { (t("Next message →", "Pesan berikutnya →")) } }
+                    @if let Some((id, tt)) = &prev { a href=(format!("/read/m/{id}")) title=(shown(&u, tt)) { (t("← Previous message", "← Pesan sebelumnya")) } }
+                    @if let Some((id, tt)) = &next { a href=(format!("/read/m/{id}")) title=(shown(&u, tt)) { (t("Next message →", "Pesan berikutnya →")) } }
                 }
             }
             aside.side {
-                h4 { (t("Cite", "Kutip")) }
+                h2 { (t("Cite", "Kutip")) }
                 div.cite { (apa) }
                 details { summary { (t("Chicago style", "Gaya Chicago")) } div.cite { (chicago) } }
-                h4 { (t("Record", "Catatan")) }
+                h2 { (t("Record", "Catatan")) }
                 dl {
                     dt { (t("Date", "Tanggal")) } dd { (m.date.as_deref().map(nice_date).unwrap_or_else(|| t("undated", "tanpa tanggal").into())) }
                     dt { (t("Source", "Sumber")) } dd {
@@ -666,28 +693,28 @@ pub async fn message(State(st): State<AppState>, Reader(u): Reader, Path(ak_id):
                     dt { (t("Collection", "Koleksi")) } dd { (collection) }
                     @if let Some(tp) = &m.topic { dt { (t("Conference topic", "Topik konferensi")) } dd { a href=(format!("/read/topic?name={}", urlencoding::encode(tp))) { (tp) } " " span.small { "(" (fmt_n(topic_n)) " " (t("messages", "pesan")) ")" } } }
                     @if m.may_tier > 0 { dt { (t("May 1998 flag", "Penanda Mei 1998")) } dd { (tier_label) } }
-                    @if let Some(s) = m.orig_subject.as_deref().filter(|s| !s.is_empty()) { dt { (t("Original subject", "Subjek asli di dalam pesan")) } dd { (s) } }
+                    @if let Some(s) = m.orig_subject.as_deref().filter(|s| !s.is_empty()) { dt { (t("Original subject", "Subjek asli di dalam pesan")) } dd { (shown(&u, s)) } }
                     @if let Some(s) = m.orig_date.as_deref().filter(|s| !s.is_empty()) { dt { (t("Original date line", "Baris tanggal asli")) } dd { (s) } }
                     dt { (t("Posted by", "Dikirim oleh")) } dd { (shown(&u, &m.sender.clone().unwrap_or_default())) }
-                    dt { (t("Subject as posted", "Subjek seperti dikirim")) } dd { (m.subject) }
+                    dt { (t("Subject as posted", "Subjek seperti dikirim")) } dd { (shown(&u, &m.subject)) }
                 }
-                h4 { (t("Provenance", "Asal-usul")) }
+                h2 { (t("Provenance", "Asal-usul")) }
                 p {
-                    @if let Some(w) = &m.wayback { a href=(w) rel="noopener" { (t("Internet Archive capture", "Rekaman Internet Archive")) } br; }
+                    @if let Some(w) = m.wayback.as_ref().filter(|w| w.starts_with("https://web.archive.org/") || w.starts_with("http://web.archive.org/")) { a href=(w) rel="noopener noreferrer" { (t("Internet Archive capture", "Rekaman Internet Archive")) } br; }
                     @if let Some(o) = &m.orig_url { span.small { (o) } br; }
                     a href=(format!("/read/m/{}/raw", m.ak_id)) { (t("Raw text as recovered", "Teks mentah seperti dipulihkan")) }
                 }
-                @if !themes.is_empty() { h4 { (t("Themes", "Tema")) } @for (s, n, about) in &themes { @if *about { a.chip href=(format!("/read/theme/{s}")) title=(t("The message is about this theme", "Pesan ini membahas tema ini")) { (i18n::theme_name(s, n)) } } @else { a.chip.weak href=(format!("/read/theme/{s}?all=1")) title=(t("The message mentions this theme", "Pesan ini menyebut tema ini")) { (i18n::theme_name(s, n)) } } } p.small { (t("Solid: about the theme. Outlined: mentions it.", "Penuh: membahas tema. Bergaris: menyebutnya.")) } }
-                @if !ents.is_empty() { h4 { (t("Names", "Nama")) } @for (s, n, _) in &ents { a.chip href=(format!("/read/entity/{s}")) { (n) } } }
+                @if !themes.is_empty() { h2 { (t("Themes", "Tema")) } @for (s, n, about) in &themes { @if *about { a.chip href=(format!("/read/theme/{s}")) title=(t("The message is about this theme", "Pesan ini membahas tema ini")) { (i18n::theme_name(s, n)) } } @else { a.chip.weak href=(format!("/read/theme/{s}?all=1")) title=(t("The message mentions this theme", "Pesan ini menyebut tema ini")) { (i18n::theme_name(s, n)) } } } p.small { (t("Solid: about the theme. Outlined: mentions it.", "Penuh: membahas tema. Bergaris: menyebutnya.")) } }
+                @if !ents.is_empty() { h2 { (t("Names", "Nama")) } @for (s, n, _) in &ents { a.chip href=(format!("/read/entity/{s}")) { (n) } } }
                 @if !copies.is_empty() {
-                    h4 { (t("Other copies", "Salinan lain")) }
+                    h2 { (t("Other copies", "Salinan lain")) }
                     @for r in &copies { div { a href=(format!("/read/m/{}", r.ak_id)) { (r.ak_id) } " " span.small { (r.date.clone().unwrap_or_default()) } } }
                 }
                 @if !thread.is_empty() {
-                    h4 { a href=(format!("/read/thread/{}", m.thread_id.clone().unwrap_or_default())) { (t("Thread", "Utas")) " (" (thread.len()) ")" } }
-                    @for r in &thread { div { @if r.ak_id == m.ak_id { b { (r.title) } } @else { a href=(format!("/read/m/{}", r.ak_id)) { (r.title) } } " " span.small { (r.date.clone().unwrap_or_default()) } } }
+                    h2 { a href=(format!("/read/thread/{}", m.thread_id.clone().unwrap_or_default())) { (t("Thread", "Utas")) " (" (thread.len()) ")" } }
+                    @for r in &thread { div { @if r.ak_id == m.ak_id { b { (shown(&u, &r.title)) } } @else { a href=(format!("/read/m/{}", r.ak_id)) { (shown(&u, &r.title)) } } " " span.small { (r.date.clone().unwrap_or_default()) } } }
                 }
-                h4 { (t("Your notes", "Catatan Anda")) }
+                h2 { (t("Your notes", "Catatan Anda")) }
                 form method="post" action=(format!("/read/m/{}/bookmark", m.ak_id)) {
                     (csrf_field())
                     textarea name="note" placeholder=(t("Private note, saved with a bookmark", "Catatan pribadi, disimpan bersama penanda")) { (bm.clone().unwrap_or_default()) }
@@ -697,14 +724,15 @@ pub async fn message(State(st): State<AppState>, Reader(u): Reader, Path(ak_id):
                     }
                 }
                 @if u.is_admin() {
-                    h4 { "Editor" }
-                    form method="post" action=(format!("/admin/sensitive/{}", m.ak_id)) { (csrf_field()) button.btn.ghost type="submit" { (if m.sensitive { "Unmark sensitive" } else { "Mark sensitive" }) } }
+                    h2 { "Editor" }
+                    form method="post" action=(format!("/admin/sensitive/{}", m.ak_id)) { (csrf_field()) button.btn.ghost type="submit" { (if marked { "Unmark sensitive" } else { "Mark sensitive" }) } }
+                    p.small { "Applies to every copy of this text." }
                     @if m.may_tier >= 2 { p.small { a href=(format!("/admin/review#{}", m.ak_id)) { "Open in the review page" } } }
                 }
             }
         }
     };
-    Ok(page(&m.title, Some(&u), "read", body).into_response())
+    Ok(page(&shown(&u, &m.title), Some(&u), "read", body).into_response())
 }
 
 pub async fn raw(State(st): State<AppState>, Reader(u): Reader, Path(ak_id): Path<String>) -> Result<Response, AppError> {
@@ -733,10 +761,25 @@ pub struct BmForm {
     remove: String,
 }
 
+/// An AK ID as the archive writes them (letters, digits and dashes), safe in an address.
+pub fn plain_id(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 40 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 pub async fn bookmark(State(st): State<AppState>, Reader(u): Reader, Path(ak_id): Path<String>, Form(f): Form<BmForm>) -> Result<Redirect, AppError> {
+    if !plain_id(&ak_id) {
+        return Ok(Redirect::to("/read/bookmarks"));
+    }
     let id2 = ak_id.clone();
-    let known: Option<i64> = blocking(&st, move |c| c.query_row("SELECT id FROM messages WHERE ak_id = ?1", [&id2], |r| r.get(0)).optional()).await?;
-    if known.is_some() {
+    let known: Option<bool> = blocking(&st, move |c| c.query_row("SELECT sensitive FROM messages WHERE ak_id = ?1", [&id2], |r| Ok(r.get::<_, i64>(0)? == 1)).optional()).await?;
+    // a restricted message cannot be bookmarked by a reader who may not read it (a bookmark
+    // made before it was restricted can still be removed)
+    let allowed = match known {
+        Some(restricted) => f.remove == "1" || !restricted || u.can_see_sensitive(),
+        // a bookmark of a message the archive no longer holds can still be removed
+        None => f.remove == "1",
+    };
+    if allowed {
         let (uid, id3) = (u.id, ak_id.clone());
         site(&st, move |c| {
             if f.remove == "1" {
@@ -777,19 +820,23 @@ pub async fn bookmarks(State(st): State<AppState>, Reader(u): Reader, Query(fq):
     let mut rows: Vec<(String, Option<String>, String, Option<String>, String, Option<String>)> = marks
         .into_iter()
         .map(|(ak, note)| match meta.get(&ak) {
-            Some((d, title, src, wb, sens)) => {
-                let title = if *sens && !can { withheld.to_string() } else { title.clone() };
-                (ak, d.clone(), title, src.clone(), note, wb.clone())
-            }
+            // of a restricted message, a reader keeps only the ID and their own note
+            Some((_, _, _, _, true)) if !can => (ak, None, withheld.to_string(), None, note, None),
+            Some((d, title, src, wb, _)) => (ak, d.clone(), shown(&u, title), src.clone(), note, wb.clone()),
             None => (ak, None, missing.to_string(), None, note, None),
         })
         .collect();
     rows.sort_by(|a, b| (a.1.clone(), a.0.clone()).cmp(&(b.1.clone(), b.0.clone())));
     if fq.format == "csv" {
-        let mut out = String::from("ak_id,date,title,source,note,wayback_url\n");
-        let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+        let mut out = String::from("ak_id,date,title,source,note,link,wayback_url\n");
+        let q = |s: &str| {
+            // a cell that starts like a formula is written as text
+            let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{s}") } else { s.to_string() };
+            format!("\"{}\"", s.replace('"', "\"\""))
+        };
         for r in &rows {
-            out.push_str(&format!("{},{},{},{},{},{}\n", r.0, r.1.clone().unwrap_or_default(), q(&r.2), r.3.clone().unwrap_or_default(), q(&r.4), r.5.clone().unwrap_or_default()));
+            let link = st.url(&format!("/read/m/{}", r.0));
+            out.push_str(&format!("{},{},{},{},{},{},{}\n", q(&r.0), r.1.clone().unwrap_or_default(), q(&r.2), q(&r.3.clone().unwrap_or_default()), q(&r.4), q(&link), q(&r.5.clone().unwrap_or_default())));
         }
         return Ok(([(header::CONTENT_TYPE, "text/csv; charset=utf-8"), (header::CONTENT_DISPOSITION, "attachment; filename=\"apakabar-bookmarks.csv\"")], out).into_response());
     }
@@ -797,7 +844,7 @@ pub async fn bookmarks(State(st): State<AppState>, Reader(u): Reader, Query(fq):
         div.wide {
             div.kicker { (kicker_home()) " / " (t("bookmarks", "penanda")) }
             h1 { (t("Your bookmarks", "Penanda Anda")) }
-            p { (rows.len()) " " (t("messages.", "pesan.")) " " @if !rows.is_empty() { a href="/read/bookmarks?format=csv" { (t("Download as CSV", "Unduh sebagai CSV")) } " " (t("(IDs, dates, titles, your notes and the archive links; no full texts).", "(ID, tanggal, judul, catatan Anda dan tautan arsip; tanpa teks lengkap).")) } }
+            p { (rows.len()) " " (t("messages.", "pesan.")) " " @if !rows.is_empty() { a href="/read/bookmarks?format=csv" { (t("Download as CSV", "Unduh sebagai CSV")) } " " (t("(IDs, dates, titles, your notes and the links; no full texts).", "(ID, tanggal, judul, catatan Anda dan tautannya; tanpa teks lengkap).")) } }
             table.t {
                 thead { tr { th { (t("Date", "Tanggal")) } th { (t("Message", "Pesan")) } th { (t("Source", "Sumber")) } th { (t("Your note", "Catatan Anda")) } } }
                 tbody { @for r in &rows { tr { td { (r.1.clone().unwrap_or_default()) } td { a href=(format!("/read/m/{}", r.0)) { (r.2) } } td { (r.3.clone().unwrap_or_default()) } td { (r.4) } } } }
@@ -840,7 +887,7 @@ async fn listing(st: &AppState, u: &User, title: String, kicker: Markup, intro: 
 }
 
 pub async fn day(State(st): State<AppState>, Reader(u): Reader, Path(date): Path<String>, Query(p): Query<PageQ>) -> Result<Markup, AppError> {
-    if date.len() != 10 { return Err(AppError("bad date".into())); }
+    if date.len() != 10 || chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").is_err() { return Err(AppError("bad date".into())); }
     let d = date.clone();
     let (prev, next) = blocking(&st, move |c| {
         let prev: Option<String> = c.query_row("SELECT max(date) FROM messages WHERE date < ?1", [&d], |r| r.get(0))?;
@@ -852,11 +899,11 @@ pub async fn day(State(st): State<AppState>, Reader(u): Reader, Path(date): Path
         a href=(format!("/read/month/{}", &date[..7])) { (t("Whole month", "Sebulan penuh")) }
         @if let Some(n) = &next { a href=(format!("/read/day/{n}")) { (nice_date(n)) " →" } }
     } };
-    listing(&st, &u, nice_date(&date), html! { (kicker_home()) " / " (t("day", "hari")) }, intro, "m.date = ? AND m.collection != 'iri-l'".into(), vec![date.clone().into()], "m.id", p.page.unwrap_or(1).max(1), format!("/read/day/{date}")).await
+    listing(&st, &u, nice_date(&date), html! { (kicker_home()) " / " (t("day", "hari")) }, intro, "m.date = ? AND m.collection != 'iri-l'".into(), vec![date.clone().into()], "m.id", p.page.unwrap_or(1).clamp(1, 2000), format!("/read/day/{date}")).await
 }
 
 pub async fn month(State(st): State<AppState>, Reader(u): Reader, Path(ym): Path<String>) -> Result<Markup, AppError> {
-    if ym.len() != 7 { return Err(AppError("bad month".into())); }
+    if ym.len() != 7 || chrono::NaiveDate::parse_from_str(&format!("{ym}-01"), "%Y-%m-%d").is_err() { return Err(AppError("bad month".into())); }
     let y2 = ym.clone();
     let days: Vec<(String, i64)> = blocking(&st, move |c| {
         c.prepare("SELECT date, count(*) FROM messages WHERE ym = ?1 AND counted = 1 AND date IS NOT NULL GROUP BY date ORDER BY date")?.query_map([y2], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
@@ -876,19 +923,19 @@ pub async fn month(State(st): State<AppState>, Reader(u): Reader, Path(ym): Path
             h1 { (nice_date(&ym)) }
             div.pager { a href=(format!("/read/month/{prev_m}")) { "← " (charts::nice_ym(&prev_m)) } a href=(format!("/read/month/{next_m}")) { (charts::nice_ym(&next_m)) " →" } }
             p.small { (fmt_n(days.iter().map(|d| d.1).sum())) " " (t("messages (duplicate copies not counted). Pick a day.", "pesan (salinan ganda tidak dihitung). Pilih satu hari.")) }
-            div style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px;max-width:640px;font:13px var(--sans)" {
-                @for d in i18n::weekdays() { div.small style="text-align:center" { (d) } }
+            div.mcal {
+                @for d in i18n::weekdays() { div.small.wd { (d) } }
                 @for _ in 0..offset { div {} }
                 @for dd in 1..=ndays {
                     @let k = format!("{ym}-{dd:02}");
                     @match days.iter().find(|x| x.0 == k) {
                         Some((_, n)) => {
-                            @let a = ((*n as f64 / max).sqrt() * 90.0).round();
-                            a href=(format!("/read/day/{k}")) style=(format!("display:block;padding:10px 6px;border-radius:6px;text-decoration:none;background:color-mix(in srgb, var(--accent) {a}%, var(--chip));color:{}", if a > 55.0 { "var(--paper)" } else { "var(--ink)" })) {
-                                b { (dd) } br; span style="font-size:11px" { (n) " " (t("msgs", "psn")) }
+                            @let a = ((*n as f64 / max).sqrt() * 48.0).round();
+                            a href=(format!("/read/day/{k}")) title=(format!("{} {}", fmt_n(*n), t("messages", "pesan"))) style=(format!("background:color-mix(in srgb, var(--accent) {a}%, var(--chip))")) {
+                                b { (dd) } span.n { (n) span.unit { " " (t("msgs", "psn")) } }
                             }
                         }
-                        None => div style="padding:10px 6px;border-radius:6px;background:var(--chip);opacity:.4" { (dd) br; span style="font-size:11px" { (t("none captured", "tak ada")) } }
+                        None => div.none { b { (dd) } span.n { span.unit { (t("none captured", "tak ada")) } span.dash { "–" } } }
                     }
                 }
             }
@@ -899,7 +946,7 @@ pub async fn month(State(st): State<AppState>, Reader(u): Reader, Path(ym): Path
 
 pub async fn thread(State(st): State<AppState>, Reader(u): Reader, Path(id): Path<String>, Query(p): Query<PageQ>) -> Result<Markup, AppError> {
     let intro = html! { p.small { (t("Messages with the same subject, a reply among them, no more than 45 days apart. The thread is named after its first message, ", "Pesan-pesan dengan subjek yang sama, salah satunya balasan, berjarak tidak lebih dari 45 hari. Utas ini dinamai menurut pesan pertamanya, ")) a href=(format!("/read/m/{id}")) { (id) } "." } };
-    listing(&st, &u, t("Thread", "Utas").into(), html! { (kicker_home()) " / " (t("thread", "utas")) }, intro, "m.thread_id = ?".into(), vec![id.clone().into()], "m.date IS NULL, m.date, m.id", p.page.unwrap_or(1).max(1), format!("/read/thread/{}", urlencoding::encode(&id))).await
+    listing(&st, &u, t("Thread", "Utas").into(), html! { (kicker_home()) " / " (t("thread", "utas")) }, intro, "m.thread_id = ?".into(), vec![id.clone().into()], "m.date IS NULL, m.date, m.id", p.page.unwrap_or(1).clamp(1, 2000), format!("/read/thread/{}", urlencoding::encode(&id))).await
 }
 
 /// The messages the database's folder listings name but no capture holds.
@@ -979,13 +1026,13 @@ pub struct TopicQ {
 
 pub async fn topic(State(st): State<AppState>, Reader(u): Reader, Query(q): Query<TopicQ>) -> Result<Markup, AppError> {
     let intro = html! { p.small { (t("Replies filed under this conference topic, oldest first. Their titles come from the first lines of each text; the subject line only names the topic. ", "Balasan yang diajukan di bawah topik konferensi ini, dari yang terlama. Judulnya diambil dari baris pertama setiap teks; baris subjek hanya menyebut topiknya. ")) a href="/read/topics" { (t("All topics", "Semua topik")) } "." } };
-    listing(&st, &u, q.name.clone(), html! { (kicker_home()) " / " a href="/read/topics" { (t("topics", "topik")) } }, intro, "m.topic = ? AND m.counted = 1".into(), vec![q.name.clone().into()], "m.date IS NULL, m.date, m.id", q.page.unwrap_or(1).max(1), format!("/read/topic?name={}", urlencoding::encode(&q.name))).await
+    listing(&st, &u, q.name.clone(), html! { (kicker_home()) " / " a href="/read/topics" { (t("topics", "topik")) } }, intro, "m.topic = ? AND m.counted = 1".into(), vec![q.name.clone().into()], "m.date IS NULL, m.date, m.id", q.page.unwrap_or(1).clamp(1, 2000), format!("/read/topic?name={}", urlencoding::encode(&q.name))).await
 }
 
 pub async fn source(State(st): State<AppState>, Reader(u): Reader, Path(code): Path<String>, Query(p): Query<PageQ>) -> Result<Markup, AppError> {
     let name = sources::BY_CODE.get(code.as_str()).map(|s| format!("{} ({})", s.name, i18n::category_label(s.category))).unwrap_or_else(|| code.clone());
     listing(&st, &u, name, html! { (kicker_home()) " / " (t("source", "sumber")) " " (code) }, html! { p.small { (t("Messages whose subject, archive link or opening lines name this source. Duplicate copies hidden.", "Pesan yang subjek, tautan arsip atau baris pembukanya menyebut sumber ini. Salinan ganda disembunyikan.")) } },
-        "m.source_code = ? AND m.counted = 1".into(), vec![code.clone().into()], "m.date IS NULL, m.date, m.id", p.page.unwrap_or(1).max(1), format!("/read/source/{}", urlencoding::encode(&code))).await
+        "m.source_code = ? AND m.counted = 1".into(), vec![code.clone().into()], "m.date IS NULL, m.date, m.id", p.page.unwrap_or(1).clamp(1, 2000), format!("/read/source/{}", urlencoding::encode(&code))).await
 }
 
 #[derive(Deserialize)]
@@ -1011,7 +1058,7 @@ pub async fn theme(State(st): State<AppState>, Reader(u): Reader, Path(slug): Pa
     let cond = if all { "" } else { " AND mt.about = 1" };
     let base = if all { format!("/read/theme/{slug}?all=1") } else { format!("/read/theme/{slug}") };
     listing(&st, &u, title, html! { (kicker_home()) " / " (t("theme", "tema")) }, intro,
-        format!("m.counted = 1 AND m.id IN (SELECT mt.msg_id FROM message_themes mt JOIN themes t ON t.id = mt.theme_id WHERE t.slug = ?{cond})"), vec![slug.clone().into()], "m.date IS NULL, m.date, m.id", p.page.unwrap_or(1).max(1), base).await
+        format!("m.counted = 1 AND m.id IN (SELECT mt.msg_id FROM message_themes mt JOIN themes t ON t.id = mt.theme_id WHERE t.slug = ?{cond})"), vec![slug.clone().into()], "m.date IS NULL, m.date, m.id", p.page.unwrap_or(1).clamp(1, 2000), base).await
 }
 
 pub async fn entity(State(st): State<AppState>, Reader(u): Reader, Path(slug): Path<String>, Query(p): Query<PageQ>) -> Result<Markup, AppError> {
@@ -1019,7 +1066,7 @@ pub async fn entity(State(st): State<AppState>, Reader(u): Reader, Path(slug): P
     let title = e.map(|e| e.name.to_string()).unwrap_or_else(|| slug.clone());
     let intro = html! { @if let Some(e) = e { p.small { (t("Matched on", "Dicocokkan dengan")) ": " @for a in e.aliases { span.chip { (a) } } " " (t("(whole words, any case). Short names can catch other people of the same name.", "(kata utuh, huruf besar atau kecil). Nama pendek dapat menjaring orang lain dengan nama yang sama.")) } } };
     listing(&st, &u, title, html! { (kicker_home()) " / " (t("name", "nama")) }, intro,
-        "m.counted = 1 AND m.id IN (SELECT me.msg_id FROM message_entities me JOIN entities e ON e.id = me.entity_id WHERE e.slug = ?)".into(), vec![slug.clone().into()], "m.date IS NULL, m.date, m.id", p.page.unwrap_or(1).max(1), format!("/read/entity/{slug}")).await
+        "m.counted = 1 AND m.id IN (SELECT me.msg_id FROM message_entities me JOIN entities e ON e.id = me.entity_id WHERE e.slug = ?)".into(), vec![slug.clone().into()], "m.date IS NULL, m.date, m.id", p.page.unwrap_or(1).clamp(1, 2000), format!("/read/entity/{slug}")).await
 }
 
 pub async fn event(State(st): State<AppState>, Reader(u): Reader, Path(slug): Path<String>, Query(p): Query<PageQ>) -> Result<Response, AppError> {
@@ -1031,7 +1078,7 @@ pub async fn event(State(st): State<AppState>, Reader(u): Reader, Path(slug): Pa
     };
     Ok(listing(&st, &u, i18n::event_name(ev.slug, ev.name), html! { (kicker_home()) " / " (t("event", "peristiwa")) }, intro,
         "m.counted = 1 AND m.date BETWEEN ? AND ? AND m.id IN (SELECT rowid FROM fts WHERE fts MATCH ?)".into(),
-        vec![shift(ev.date, -3).into(), shift(ev.date, 60).into(), ev.query.to_string().into()], "m.date IS NULL, m.date, m.id", p.page.unwrap_or(1).max(1), format!("/read/event/{slug}")).await?.into_response())
+        vec![shift(ev.date, -3).into(), shift(ev.date, 60).into(), ev.query.to_string().into()], "m.date IS NULL, m.date, m.id", p.page.unwrap_or(1).clamp(1, 2000), format!("/read/event/{slug}")).await?.into_response())
 }
 
 fn shift(d: &str, days: i64) -> String {
@@ -1048,7 +1095,7 @@ pub struct CollQ {
 pub async fn collection(State(st): State<AppState>, Reader(u): Reader, Path(slug): Path<String>, Query(p): Query<CollQ>) -> Result<Response, AppError> {
     let focused = p.tier == "3";
     let (title, intro, wh): (&str, &str, &str) = match slug.as_str() {
-        "may-1998" if focused => (t("May 1998: the sexual violence (focused)", "Mei 1998: kekerasan seksual (terfokus)"), t("Tier 3: messages from 13 May 1998 on that discuss the sexual violence of the riots in two or more paragraphs, or under a title about it, and mention it less often for other places. A keyword net, not a verdict: read each message.", "Tingkat 3: pesan sejak 13 Mei 1998 yang membahas kekerasan seksual dalam kerusuhan di dua paragraf atau lebih, atau di bawah judul tentangnya, dan lebih jarang menyebutnya untuk tempat lain. Ini jaring kata kunci, bukan putusan: bacalah setiap pesan."), "m.may98_tier = 3 AND m.counted = 1"),
+        "may-1998" if focused => (t("May 1998: the sexual violence (focused)", "Mei 1998: kekerasan seksual (terfokus)"), t("Tier 3: messages from 13 May 1998 on that discuss the sexual violence of the riots in two or more paragraphs, or under a title about it, and mention it less often for other places. A keyword net, not a verdict: read each message.", "Tingkat 3: pesan sejak 13 Mei 1998 yang membahas kekerasan seksual dalam kerusuhan di dua paragraf atau lebih, atau di bawah judul tentangnya, dan lebih jarang menyebutnya untuk tempat lain. Ini jaring kata kunci, bukan putusan: bacalah setiap pesan."), "m.may98_tier >= 2 AND m.may98_tier = 3 AND m.counted = 1"),
         "may-1998" => (t("May 1998: riots and sexual violence", "Mei 1998: kerusuhan dan kekerasan seksual"), t("Tiers 2 and 3: messages from 13 May 1998 on in which rape or sexual violence appears in the same paragraph as the riots, Chinese Indonesians or the inquiries (TGPF, Tim Relawan, Komnas Perempuan, Ita Martadinata). A keyword net, not a verdict: read each message.", "Tingkat 2 dan 3: pesan sejak 13 Mei 1998 yang menyebut perkosaan atau kekerasan seksual dalam paragraf yang sama dengan kerusuhan, warga Tionghoa atau penyelidikan (TGPF, Tim Relawan, Komnas Perempuan, Ita Martadinata). Ini jaring kata kunci, bukan putusan: bacalah setiap pesan."), "m.may98_tier >= 2 AND m.counted = 1"),
         "sexual-violence" => (t("Sexual violence, all years", "Kekerasan seksual, semua tahun"), t("Every message that mentions rape or sexual violence, including East Timor, Aceh and Papua. A keyword net.", "Setiap pesan yang menyebut perkosaan atau kekerasan seksual, termasuk di Timor Timur, Aceh dan Papua. Jaring kata kunci."), "m.sv_flag = 1 AND m.counted = 1"),
         "iri-l" => ("IRI-L", t("An unrelated list whose archive sat beside apakabar's at indopubs.com (only a few dozen of its messages mention Indonesia). Kept for completeness and left out of every figure.", "Milis lain yang arsipnya berada di samping arsip apakabar di indopubs.com (hanya beberapa puluh pesannya menyebut Indonesia). Disimpan demi kelengkapan dan tidak dihitung dalam angka mana pun."), "m.collection = 'iri-l'"),
@@ -1064,17 +1111,32 @@ pub async fn collection(State(st): State<AppState>, Reader(u): Reader, Path(slug
     Ok(listing(&st, &u, title.into(), html! { (kicker_home()) " / " (t("collection", "koleksi")) }, html! {
         p { (intro) }
         @if review_note { p.small { (t("Messages that may name survivors are shown only to approved researchers until an editor has reviewed them, so this list is shorter for readers.", "Pesan yang mungkin menyebut nama penyintas hanya ditampilkan bagi peneliti yang disetujui sampai editor meninjaunya, sehingga daftar ini lebih pendek bagi pembaca.")) } }
-    }, wh.into(), vec![], "m.date IS NULL, m.date, m.id", p.page.unwrap_or(1).max(1), base).await?.into_response())
+    }, wh.into(), vec![], "m.date IS NULL, m.date, m.id", p.page.unwrap_or(1).clamp(1, 2000), base).await?.into_response())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{fts_query, mask_emails};
+    use super::{fts_query, mask_emails, visible, User, ROW_COLS};
+    #[test]
+    fn restriction_checks_use_the_index() {
+        assert!(ROW_COLS.ends_with(&format!("m.id IN {}", crate::db::RESTRICTED_IDS)));
+        let reader = User { id: 1, email: String::new(), name: String::new(), role: "reader".into() };
+        assert_eq!(visible(&reader), format!("m.id NOT IN {}", crate::db::RESTRICTED_IDS));
+    }
+    #[test]
+    fn long_queries_are_bounded() {
+        let q = fts_query(&"perkosaan ".repeat(60)).unwrap();
+        assert!(q.matches("perkosa").count() <= 24, "{q}");
+        // words joined by OR count too
+        let q = fts_query(&["abcd"; 40].join(" OR ")).unwrap();
+        assert_eq!(q.matches("abcd").count(), 12, "{q}");
+    }
     #[test]
     fn queries() {
         assert_eq!(fts_query("perkosaan").unwrap(), "(\"perkosaan\"* OR stems:\"perkosa\")");
         assert_eq!(fts_query("perang").unwrap(), "\"perang\"*");
-        assert_eq!(fts_query("\"tim relawan\" -pki").unwrap(), "\"tim relawan\" NOT \"pki\"*");
+        assert_eq!(fts_query("\"tim relawan\" -pki").unwrap(), "\"tim relawan\" NOT \"pki\"");
+        assert_eq!(fts_query("ber").unwrap(), "\"ber\"");
         assert_eq!(fts_query("timor OR timtim").unwrap(), "(\"timor\"* OR \"timtim\"*)");
         assert!(fts_query("-pki").is_none());
     }
@@ -1083,5 +1145,8 @@ mod tests {
         assert_eq!(mask_emails("From: Budi <budi.s@igc.apc.org>"), "From: Budi <\u{2022}\u{2022}\u{2022}@igc.apc.org>");
         assert_eq!(mask_emails("apakabar@clark.net and indonesia-l@igc.org"), "apakabar@clark.net and indonesia-l@igc.org");
         assert_eq!(mask_emails("no address here"), "no address here");
+        // a search highlight inside an address does not let it through
+        assert_eq!(mask_emails("budi@\u{1}igc\u{2}.apc.org"), "\u{2022}\u{2022}\u{2022}@igc.apc.org");
+        assert_eq!(mask_emails("\u{1}budi\u{2}@igc.apc.org wrote"), "\u{2022}\u{2022}\u{2022}@igc.apc.org wrote");
     }
 }

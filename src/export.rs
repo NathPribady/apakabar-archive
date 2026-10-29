@@ -315,7 +315,7 @@ pub fn run(db_path: &Path, out: &Path, parent: &str) -> Result<()> {
         }
     }
     {
-        let ws = wb.add_worksheet_with_constant_memory();
+        let ws = wb.add_worksheet_with_constant_memory()?;
         ws.set_name("Items")?;
         write_table(ws, &header, &early, 18.0)?;
     }
@@ -383,7 +383,7 @@ pub fn run(db_path: &Path, out: &Path, parent: &str) -> Result<()> {
         ws.write_string(0, 0, "Items 1998-2002 and the indopubs.com list archives. Continuation of the Items sheet in \"Apakabar Archive Index.xlsx\" (split to keep each file small). Same columns; see the README and Data dictionary there.")?;
     }
     {
-        let ws = wb2.add_worksheet_with_constant_memory();
+        let ws = wb2.add_worksheet_with_constant_memory()?;
         ws.set_name("Items")?;
         write_table(ws, &header, &late, 18.0)?;
     }

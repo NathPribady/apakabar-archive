@@ -19,6 +19,11 @@ milliseconds each.
 
 To put the site online with Replit, follow **DEPLOY-REPLIT.md**.
 
+**This repository holds the program only.** The message texts, the archive database built from
+them and the site's accounts are not in it, and nothing in it gives access to them. Researchers
+who need the texts or the database for their work can write to the editors: nath@logosid.app or
+np2903@tc.columbia.edu.
+
 ## Quick start on your own computer (macOS or Linux)
 
 `./run.sh` builds the program, builds the archive database when it is missing or was made by an
@@ -32,7 +37,7 @@ There is no editor account yet. Create yours here (the link works once, until th
 
 By hand:
 
-1. Install Rust 1.85 or newer, once: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+1. Install Rust 1.88 or newer, once: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
 2. Build, from this folder: `cargo build --release` (a few minutes the first time).
 3. Build the database from the harvested text files (about 3 minutes; the result is about 1.8 GB):
    ```
@@ -79,7 +84,7 @@ Options of `serve` (each can also be given as an environment variable):
 | Option | Environment variable | Meaning |
 |---|---|---|
 | `--addr HOST:PORT` | `APAKABAR_ADDR` | where to listen (default 127.0.0.1:8080) |
-| `--contact ADDRESS` | `APAKABAR_CONTACT` | the address for corrections and takedown requests on the About page |
+| `--contact ADDRESSES` | `APAKABAR_CONTACT` | the editors' addresses (one or more, separated by commas), shown in the footer and on the About page for corrections, takedown requests and access |
 | `--base-url URL` | `APAKABAR_BASE_URL` | the site's public address, used in setup and reset links |
 | `--content DIR` | `APAKABAR_CONTENT` | the folder of the essay files (default `content`) |
 | `--secure-cookies` | | cookies only over HTTPS, and HSTS (use behind HTTPS) |
@@ -109,7 +114,8 @@ Roles:
   (name, or initials or a pseudonym together with age, street, school, workplace or family),
   show when it reports, argues or denies without identifying anyone. They are suggestions only;
   the editor decides.
-- Editors can restrict any other message from its page.
+- Editors can restrict any other message from its page. A restriction, like a review decision,
+  covers every copy of the text (exact and near-identical copies alike).
 
 ## Languages and the essay
 
@@ -214,19 +220,38 @@ counts days on which nothing was filed as losses.
 ## Protection of the texts
 
 - Full texts are visible only after login, and new accounts wait for an editor's approval.
-  `robots.txt` keeps search engines out of the reading room. Each account can open 1,500 messages
-  a day, to discourage bulk copying. A login lowers the risk of copyright complaints but is not a
-  legal safe harbour: answer takedown requests promptly.
+  Each account can open 1,500 messages a day, to discourage bulk copying. A login lowers the
+  risk of copyright complaints but is not a legal safe harbour: answer takedown requests promptly.
+- **Crawlers and AI.** Search engines (Googlebot, Bingbot, DuckDuckBot, Applebot) may list the
+  public analysis pages; `robots.txt` keeps them out of the reading room, the accounts and the
+  editors' pages. Every other crawler is told to stay away (`User-agent: * / Disallow: /`), and
+  the server refuses, with 403, AI crawlers and agents (GPTBot, ClaudeBot, PerplexityBot, CCBot,
+  Bytespider, Meta, Amazon, Apple and Google AI agents and many more; the list is
+  `REFUSED_AGENTS` in `src/web/security.rs`), archive and SEO crawlers, scraping tools and
+  libraries (curl, wget, python-requests, Scrapy, headless browsers…), and anything that calls
+  itself a bot or crawler or gives no name. Google-Extended and Applebot-Extended are refused in
+  `robots.txt`, which keeps the public pages out of Google's and Apple's AI models. Every page
+  says `noai, noimageai, noarchive` (header and meta tag) and reserves text and data mining
+  (`tdm-reservation: 1`, `/.well-known/tdmrep.json`).
+- **Pace limits.** Each address (an IPv6 network counts as one) may load 300 pages in 5 minutes
+  and run 40 searches in 5 minutes; searches run three at a time across the site, and any
+  database query is stopped after 20 seconds, any request after 30. A scraper that pretends to be
+  a browser is held back by these limits and by the login; no public website can tell every such
+  scraper from a reader.
 - Passwords (10 characters or more) are hashed with Argon2id. Sessions are random tokens in
   HttpOnly, SameSite cookies (Secure behind HTTPS), kept for 30 days, and the store holds only
   their SHA-256 hashes; reset links likewise. Changing or resetting a password ends the other
   sessions; blocking an account ends all of them.
 - Every form carries a token tied to the browser (double-submit cookie) and posts from other sites
-  are refused. Failed logins are limited to 10 per address and 5 per account in 15 minutes;
-  registrations to 5 per address an hour.
-- Pages are sent with a strict Content-Security-Policy (scripts, styles and forms only from the
-  site itself, which uses no scripts at all), X-Frame-Options DENY,
-  nosniff, a same-origin referrer policy, HSTS behind HTTPS, and `Cache-Control: no-store` on the
-  reading room and the editors' pages.
+  are refused. Failed logins are limited to 10 per address, 5 per account from one address and
+  30 per account from all addresses in 15 minutes (so no one can lock an editor out from a single
+  address); registrations to 5 per address an hour. Passwords are checked two at a time, so a
+  flood of logins waits instead of exhausting the server's memory.
+- The connection to PostgreSQL is encrypted, with the server's certificate checked, unless the
+  address explicitly says `sslmode=disable` (for a database on the same machine).
+- Pages are sent with a strict Content-Security-Policy (no scripts at all; styles and forms only
+  from the site itself), X-Frame-Options DENY, nosniff, a same-origin referrer policy, HSTS behind
+  HTTPS, `Cache-Control: no-store` on the reading room and the editors' pages and `private` on
+  the others.
 - Readers see e-mail addresses masked; restricted messages (see Privacy) open only for researchers
   and editors.

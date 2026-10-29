@@ -117,12 +117,21 @@ pub async fn reset_link(State(st): State<AppState>, Admin(u): Admin, Path(id): P
     Ok(page("Reset link", Some(&u), "admin", body))
 }
 
+/// Mark or unmark a text as sensitive: the message and every copy of it.
 pub async fn toggle_sensitive(State(st): State<AppState>, Admin(u): Admin, Path(ak_id): Path<String>) -> Result<Redirect, AppError> {
+    if !crate::web::read::plain_id(&ak_id) {
+        return Ok(Redirect::to("/admin"));
+    }
     let a = ak_id.clone();
-    let on = !st.restricted.read().unwrap().sensitive.contains(&ak_id);
+    let group: Vec<String> = blocking(&st, move |c| crate::web::copies_of(c, &a)).await?;
+    let on = {
+        let r = st.restricted.read().unwrap();
+        !group.iter().any(|g| r.sensitive.contains(g))
+    };
+    let a = ak_id.clone();
     site(&st, move |c| {
-        c.set_sensitive(&[a.clone()], u.id, on, "")?;
-        c.audit(u.id, if on { "mark sensitive" } else { "unmark sensitive" }, &a)
+        c.set_sensitive(&group, u.id, on, "")?;
+        c.audit(u.id, if on { "mark sensitive" } else { "unmark sensitive" }, &format!("{a} ({} copies)", group.len()))
     })
     .await?;
     reload_restricted(&st).await?;

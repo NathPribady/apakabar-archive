@@ -43,7 +43,12 @@ impl From<rusqlite::Error> for SiteError {
 }
 impl From<postgres::Error> for SiteError {
     fn from(e: postgres::Error) -> Self {
-        SiteError(format!("site database: {e}"))
+        // the server's message and code, never its DETAIL (which can quote values, such as an
+        // email address)
+        match e.as_db_error() {
+            Some(d) => SiteError(format!("site database: {} ({})", d.message(), d.code().code())),
+            None => SiteError(format!("site database: {e}")),
+        }
     }
 }
 impl From<r2d2::Error> for SiteError {
@@ -264,6 +269,12 @@ fn pg_config(url: &str) -> Res<postgres::Config> {
         .collect();
     let url = if kept.is_empty() { base.to_string() } else { format!("{base}?{}", kept.join("&")) };
     let mut cfg = url.parse::<postgres::Config>().map_err(|e| SiteError(format!("DATABASE_URL could not be read: {e}")))?;
+    // Encrypted unless the address turns it off: without `sslmode`, the client would otherwise
+    // fall back to an unencrypted connection whenever TLS is refused along the way.
+    let mode = kept.iter().find_map(|kv| kv.strip_prefix("sslmode="));
+    if !matches!(mode, Some("disable") | Some("require")) {
+        cfg.ssl_mode(postgres::config::SslMode::Require);
+    }
     // Unless the address says otherwise: give up on a server that does not answer within
     // 10 seconds, and keep idle connections alive through the host's network (probes after
     // 30 seconds of quiet, not the system's 2 hours).
@@ -736,7 +747,10 @@ impl SiteConn {
                 Some(r) => r.i(0),
                 None => return Ok(None),
             };
-            t.exec("UPDATE resets SET used_at = $1 WHERE token_hash = $2", &[n.clone().into(), h.clone().into()])?;
+            // spent once: a second request with the same token at the same moment changes nothing
+            if t.exec("UPDATE resets SET used_at = $1 WHERE token_hash = $2 AND used_at IS NULL", &[n.clone().into(), h.clone().into()])? == 0 {
+                return Ok(None);
+            }
             t.exec("UPDATE users SET pw_hash = $1 WHERE id = $2", &[pw_hash.into(), uid.into()])?;
             t.exec("DELETE FROM sessions WHERE user_id = $1", &[uid.into()])?;
             Ok(Some(uid))
@@ -1044,6 +1058,10 @@ pub fn import_first_pass(site: &SiteDb, tools: &Path) -> Res<()> {
 
 #[cfg(test)]
 mod tests {
+    /// The PostgreSQL tests share one database (and one of them closes every connection to
+    /// it), so they take turns.
+    static PG_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     use super::*;
 
     fn roundtrip(db: &SiteDb) {
@@ -1129,6 +1147,7 @@ mod tests {
     #[test]
     fn postgres_store() {
         let Ok(url) = std::env::var("TEST_DATABASE_URL") else { return };
+        let _one_at_a_time = PG_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         {
             let mut cfg = pg_config(&url).unwrap();
             let mut c = cfg.connect(postgres::NoTls).unwrap();
@@ -1146,6 +1165,11 @@ mod tests {
         assert_eq!(c.get_ssl_mode(), postgres::config::SslMode::Require);
         assert_eq!(c.get_dbname(), Some("neondb"));
         assert!(pg_config("postgres://u:p@localhost:5432/db").is_ok());
+        // TLS is required unless the address says sslmode=disable
+        use postgres::config::SslMode;
+        assert_eq!(pg_config("postgres://u:p@h/db").unwrap().get_ssl_mode(), SslMode::Require);
+        assert_eq!(pg_config("postgres://u:p@h/db?sslmode=prefer").unwrap().get_ssl_mode(), SslMode::Require);
+        assert_eq!(pg_config("postgres://u:p@h/db?sslmode=disable").unwrap().get_ssl_mode(), SslMode::Disable);
         // time limits: ours by default, the address's when it gives them
         use std::time::Duration;
         assert_eq!(c.get_connect_timeout(), Some(&Duration::from_secs(10)));
@@ -1160,6 +1184,7 @@ mod tests {
     #[test]
     fn postgres_reconnects() {
         let Ok(url) = std::env::var("TEST_DATABASE_URL") else { return };
+        let _one_at_a_time = PG_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let db = SiteDb::open(Some(&url), Path::new("unused"), None).unwrap();
         let mut held = db.get().unwrap();
         held.count_admins().unwrap();

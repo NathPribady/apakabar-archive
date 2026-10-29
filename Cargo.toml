@@ -2,7 +2,7 @@
 name = "apakabar"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Apakabar Archive: ingest, analysis and web server for John MacDougall's apakabar lists (1990-2002)"
 
 [dependencies]
@@ -16,7 +16,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 axum = { version = "0.7", features = ["form", "query"] }
 axum-extra = { version = "0.9", features = ["cookie"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 tower-http = { version = "0.5", features = ["compression-gzip", "compression-br"] }
 maud = { version = "0.26", features = ["axum"] }
 argon2 = "0.5"
@@ -27,10 +27,10 @@ ahash = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 urlencoding = "2"
 aho-corasick = "1"
-zstd = "0.13"
+zstd = "0.14"
 time = "0.3"
 sastrawi-rs = "0.5.3"
-rust_xlsxwriter = { version = "0.96", features = ["constant_memory"] }
+rust_xlsxwriter = { version = "0.102", features = ["constant_memory"] }
 flate2 = "1"
 # the site store on hosts without a lasting disk (Replit): PostgreSQL over TLS
 postgres = "0.19"

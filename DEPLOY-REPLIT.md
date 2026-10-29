@@ -135,8 +135,9 @@ within an hour; up to 48 hours). HTTPS is set up by Replit automatically.
   marked "Unsure"), 598 to show. The suggestions were made from excerpts, so open the full
   message (its ID is a link) before clearing anything you are unsure of. The button "Apply
   the suggestion to the checked" applies the suggestions to the ticked messages in one go.
-- **Read the About page**: it shows the contact address for corrections and takedown requests
-  (`nath@logosid.app`) and the terms readers accept.
+- **Read the About page**: it shows the contact addresses for corrections, takedown requests
+  and access (`nath@logosid.app` and `np2903@tc.columbia.edu`, also in every page's footer) and
+  the terms readers accept.
 - **Edit the essay** if you wish: `content/home.en.md` and `content/home.id.md` (see below).
 
 ## Everyday work
@@ -167,13 +168,21 @@ None of this touches the accounts or your review decisions: they live in the dat
 - The reading room shows the texts only to approved accounts, and each account can open 1,500
   messages a day. A login lowers the risk of copyright complaints but is not a legal safe
   harbour: answer takedown requests (About page) promptly.
+- The GitHub repository holds the program only (see `.gitignore`): never add `data/`,
+  `apakabar.db`, `site.db`, `tools/first_pass_*.json` or a `.env` file to it. The database
+  password lives only in Replit's secrets (`DATABASE_URL`).
+- AI crawlers, AI agents, scrapers and other bots are refused by the server; search engines may
+  list the public pages only. Each address may load 300 pages and run 40 searches in 5 minutes.
+  The details are in README.md, "Protection of the texts".
+- After the archive database is rebuilt (`apakabar ingest`), restart the app so that the
+  restricted messages are marked in the new file.
 
 ## Problems
 
 | What you see | What to do |
 |---|---|
 | `No C compiler was found` | Tools → Dependencies → System: add `gcc`, then run `sh replit-build.sh` again. |
-| `curl is not available` / Rust does not install | The script installs a current Rust into `.toolchain/` by itself (Replit's own Rust, 1.53, is too old; 1.85 or newer is needed). If that fails, install it in the Shell with `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` and run the build again. |
+| `curl is not available` / Rust does not install | The script installs a current Rust into `.toolchain/` by itself (Replit's own Rust, 1.53, is too old; 1.88 or newer is needed). If that fails, install it in the Shell with `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` and run the build again. |
 | The deployment log says `./target/release/apakabar: not found` | The program was built without `build.rs`, so it asks for a loader the published app lacks. Make sure `build.rs` is in the app, run `sh replit-build.sh` in the Shell (it rebuilds the program) and publish again. |
 | `The texts are missing` | The `apakabar-data.tar.gz.part-…` files are not in `data/`: upload them. |
 | `One of the uploaded files is incomplete or damaged` | Upload the part that `sha256sum` reports as FAILED again. |
@@ -193,10 +202,10 @@ None of this touches the accounts or your review decisions: they live in the dat
   `apakabar.db` is missing, `apakabar ingest --input data --db apakabar.db` and
   `apakabar analyze --db apakabar.db`.
 - `replit-start.sh` (published): `apakabar serve --db apakabar.db --addr 0.0.0.0:8080
-  --secure-cookies --trust-proxy --require-database --contact nath@logosid.app --base-url
-  https://apakabar.nathpribady.com`. In the workspace the same without `--require-database`,
+  --secure-cookies --trust-proxy --require-database --contact "nath@logosid.app,
+  np2903@tc.columbia.edu" --base-url https://apakabar.nathpribady.com`. In the workspace the same without `--require-database`,
   with the workspace address as base URL.
 
 Settings that can be changed without touching the scripts (Secrets / deployment secrets):
-`APAKABAR_CONTACT` (the address on the About page) and `APAKABAR_BASE_URL` (the address used
+`APAKABAR_CONTACT` (the addresses on the About page and in the footer, separated by commas) and `APAKABAR_BASE_URL` (the address used
 in setup and reset links).
